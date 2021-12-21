@@ -636,13 +636,12 @@ macro(add_custom_libcxx name prefix)
                -DLLVM_PATH=${LLVM_MAIN_SRC_DIR}
                -DLLVM_ENABLE_RUNTIMES=libcxx|libcxxabi
                -DLIBCXXABI_ENABLE_SHARED=OFF
-               -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF
                -DLIBCXXABI_HERMETIC_STATIC_LIBRARY=ON
                -DLIBCXXABI_INCLUDE_TESTS=OFF
                -DLIBCXX_ENABLE_EXPERIMENTAL_LIBRARY=OFF
                -DLIBCXX_ENABLE_SHARED=OFF
-               -DLIBCXX_ENABLE_EXCEPTIONS=OFF
                -DLIBCXX_HERMETIC_STATIC_LIBRARY=ON
+               -DLIBCXX_INCLUDE_BENCHMARKS=OFF
                -DLIBCXX_INCLUDE_TESTS=OFF
                -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON
                ${LIBCXX_CMAKE_ARGS}
@@ -654,6 +653,7 @@ macro(add_custom_libcxx name prefix)
     USES_TERMINAL_INSTALL 1
     LIST_SEPARATOR |
     EXCLUDE_FROM_ALL TRUE
+    BUILD_BYPRODUCTS "${prefix}/lib/libc++.a" "${prefix}/lib/libc++abi.a"
     )
 
   if (CMAKE_GENERATOR MATCHES "Make")

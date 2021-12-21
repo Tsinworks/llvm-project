@@ -147,7 +147,44 @@ MemoryLocation::getForDest(const CallBase *CB, const TargetLibraryInfo &TLI) {
     }
   }
 
-  return None;
+  if (!CB->onlyAccessesArgMemory())
+    return None;
+
+  if (CB->hasOperandBundles())
+    // TODO: remove implementation restriction
+    return None;
+
+  Value *UsedV = nullptr;
+  Optional<unsigned> UsedIdx;
+  for (unsigned i = 0; i < CB->arg_size(); i++) {
+    if (!CB->getArgOperand(i)->getType()->isPointerTy())
+      continue;
+    if (!CB->doesNotCapture(i))
+      // capture would allow the address to be read back in an untracked manner
+      return None;
+     if (CB->onlyReadsMemory(i))
+       continue;
+    if (!UsedV) {
+      // First potentially writing parameter
+      UsedV = CB->getArgOperand(i);
+      UsedIdx = i;
+      continue;
+    }
+    UsedIdx = None;
+    if (UsedV != CB->getArgOperand(i))
+      // Can't describe writing to two distinct locations.
+      // TODO: This results in an inprecision when two values derived from the
+      // same object are passed as arguments to the same function.
+      return None;
+  }
+  if (!UsedV)
+    // We don't currently have a way to represent a "does not write" result
+    // and thus have to be conservative and return unknown.
+    return None;
+
+  if (UsedIdx)
+    return getForArgument(CB, *UsedIdx, &TLI);
+  return MemoryLocation::getBeforeOrAfter(UsedV, CB->getAAMetadata());
 }
 
 MemoryLocation MemoryLocation::getForArgument(const CallBase *Call,
@@ -271,10 +308,18 @@ MemoryLocation MemoryLocation::getForArgument(const CallBase *Call,
       return MemoryLocation(Arg, Size, AATags);
     }
     case LibFunc_memset_pattern16:
+    case LibFunc_memset_pattern4:
+    case LibFunc_memset_pattern8:
       assert((ArgIdx == 0 || ArgIdx == 1) &&
              "Invalid argument index for memset_pattern16");
-      if (ArgIdx == 1)
-        return MemoryLocation(Arg, LocationSize::precise(16), AATags);
+      if (ArgIdx == 1) {
+        unsigned Size = 16;
+        if (F == LibFunc_memset_pattern4)
+          Size = 4;
+        else if (F == LibFunc_memset_pattern8)
+          Size = 8;
+        return MemoryLocation(Arg, LocationSize::precise(Size), AATags);
+      }
       if (const ConstantInt *LenCI =
               dyn_cast<ConstantInt>(Call->getArgOperand(2)))
         return MemoryLocation(Arg, LocationSize::precise(LenCI->getZExtValue()),
@@ -309,7 +354,6 @@ MemoryLocation MemoryLocation::getForArgument(const CallBase *Call,
       break;
     };
   }
-  // FIXME: Handle memset_pattern4 and memset_pattern8 also.
 
   return MemoryLocation::getBeforeOrAfter(Call->getArgOperand(ArgIdx), AATags);
 }
