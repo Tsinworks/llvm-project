@@ -40,6 +40,8 @@ add_llvm_external_project(mlir)
 # Flang depends on mlir, so place it afterward
 add_llvm_external_project(flang)
 
+add_llvm_external_project(metal-dis)
+
 # Automatically add remaining sub-directories containing a 'CMakeLists.txt'
 # file as external projects.
 add_llvm_implicit_projects()
