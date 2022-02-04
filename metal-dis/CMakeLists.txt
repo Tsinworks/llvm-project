@@ -19,6 +19,6 @@ target_include_directories(metal-dis
 
 target_compile_features(metal-dis PRIVATE cxx_std_14)
 
-llvm_map_components_to_libnames(LLVM_LIBRARIES core)
+llvm_map_components_to_libnames(LLVM_LIBRARIES core bitreader)
 
-target_link_libraries(metal-dis ${LLVM_LIBRARIES} LLVMBitReader)
+target_link_libraries(metal-dis ${LLVM_LIBRARIES})
