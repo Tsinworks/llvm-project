@@ -15,6 +15,7 @@
 
 #include "Plugins/Process/Utility/GDBRemoteSignals.h"
 #include "Plugins/Process/gdb-remote/GDBRemoteCommunicationClient.h"
+#include "lldb/mix_device.h"
 #include "lldb/Target/Platform.h"
 
 namespace lldb_private {
@@ -27,6 +28,7 @@ public:
   static void Terminate();
 
   static lldb::PlatformSP CreateInstance(bool force, const ArchSpec *arch);
+  static lldb::PlatformSP CreateInstanceWithConnection(bool force, const ArchSpec *arch, lldb_private::Connection* connection);
 
   static llvm::StringRef GetPluginNameStatic() { return "remote-gdb-server"; }
 
@@ -96,6 +98,8 @@ public:
   bool IsConnected() const override;
 
   Status ConnectRemote(Args &args) override;
+
+  Status SetConnection(std::unique_ptr<Connection> connection);
 
   Status DisconnectRemote() override;
 
@@ -190,6 +194,9 @@ private:
   PlatformRemoteGDBServer(const PlatformRemoteGDBServer &) = delete;
   const PlatformRemoteGDBServer &
   operator=(const PlatformRemoteGDBServer &) = delete;
+
+  mix_device_t * m_dev;
+  mix_lldb_debugger * m_dev_lldb;
 };
 
 } // namespace platform_gdb_server

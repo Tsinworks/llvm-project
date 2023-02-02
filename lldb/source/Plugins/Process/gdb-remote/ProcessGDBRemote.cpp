@@ -37,6 +37,8 @@
 #include "lldb/Host/PosixApi.h"
 #include "lldb/Host/PseudoTerminal.h"
 #include "lldb/Host/ThreadLauncher.h"
+#include "lldb/Host/ConnectionRemoteIOS.h"
+#include "lldb/Utility/UriParser.h"
 #include "lldb/Host/XML.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Interpreter/CommandObject.h"
@@ -805,25 +807,35 @@ Status ProcessGDBRemote::ConnectToDebugserver(llvm::StringRef connect_url) {
   if (!connect_url.empty()) {
     LLDB_LOGF(log, "ProcessGDBRemote::%s Connecting to %s", __FUNCTION__,
               connect_url.str().c_str());
-    std::unique_ptr<ConnectionFileDescriptor> conn_up(
-        new ConnectionFileDescriptor());
-    if (conn_up) {
-      const uint32_t max_retry_count = 50;
-      uint32_t retry_count = 0;
-      while (!m_gdb_comm.IsConnected()) {
-        if (conn_up->Connect(connect_url, &error) == eConnectionStatusSuccess) {
-          m_gdb_comm.SetConnection(std::move(conn_up));
-          break;
+    if (!m_gdb_comm.IsConnected()) {
+        std::unique_ptr<Connection> conn_up;
+    
+        if (connect_url.startswith("ios:")) {
+            conn_up.reset(new ConnectionRemoteIOS);
+        } else {
+            conn_up.reset(new ConnectionFileDescriptor());
         }
 
-        retry_count++;
 
-        if (retry_count >= max_retry_count)
-          break;
+        if (conn_up) {
+          const uint32_t max_retry_count = 50;
+          uint32_t retry_count = 0;
+          while (!m_gdb_comm.IsConnected()) {
+            if (conn_up->Connect(connect_url, &error) == eConnectionStatusSuccess) {
+              m_gdb_comm.SetConnection(std::move(conn_up));
+              break;
+            }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      }
+            retry_count++;
+
+            if (retry_count >= max_retry_count)
+              break;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+        }
     }
+    
   }
 
   if (!m_gdb_comm.IsConnected()) {

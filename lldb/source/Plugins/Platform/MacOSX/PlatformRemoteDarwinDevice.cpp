@@ -49,6 +49,7 @@ PlatformRemoteDarwinDevice::~PlatformRemoteDarwinDevice() = default;
 
 void PlatformRemoteDarwinDevice::GetStatus(Stream &strm) {
   Platform::GetStatus(strm);
+  // https://github.com/xybp888/iOS-SDKs/releases
   const char *sdk_directory = GetDeviceSupportDirectoryForOSVersion();
   if (sdk_directory)
     strm.Printf("  SDK Path: \"%s\"\n", sdk_directory);

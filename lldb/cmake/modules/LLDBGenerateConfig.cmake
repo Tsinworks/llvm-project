@@ -18,6 +18,12 @@ check_cxx_symbol_exists(process_vm_readv "sys/uio.h" HAVE_PROCESS_VM_READV)
 check_cxx_symbol_exists(__NR_process_vm_readv "sys/syscall.h" HAVE_NR_PROCESS_VM_READV)
 
 check_library_exists(compression compression_encode_buffer "" HAVE_LIBCOMPRESSION)
+if (HAVE_LIBCOMPRESSION)
+  message(STATUS "Found libcompression")
+else()
+  message(STATUS "Unfound libcompression ${HAVE_LIBCOMPRESSION}")
+endif()
+
 
 set(LLDB_INSTALL_LIBDIR_BASENAME "lib${LLDB_LIBDIR_SUFFIX}")
 

@@ -10,7 +10,6 @@
 
 #include <cmath>
 #include <sys/stat.h>
-
 #include <numeric>
 #include <optional>
 #include <sstream>

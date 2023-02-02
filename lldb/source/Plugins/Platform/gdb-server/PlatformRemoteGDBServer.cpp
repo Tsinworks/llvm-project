@@ -18,6 +18,7 @@
 #include "lldb/Core/StreamFile.h"
 #include "lldb/Host/ConnectionFileDescriptor.h"
 #include "lldb/Host/Host.h"
+#include "lldb/Host/ConnectionRemoteIOS.h"
 #include "lldb/Host/HostInfo.h"
 #include "lldb/Host/PosixApi.h"
 #include "lldb/Target/Process.h"
@@ -72,6 +73,21 @@ PlatformSP PlatformRemoteGDBServer::CreateInstance(bool force,
   }
   if (create)
     return PlatformSP(new PlatformRemoteGDBServer());
+  return PlatformSP();
+}
+
+lldb::PlatformSP PlatformRemoteGDBServer::CreateInstanceWithConnection(bool force,
+                                                                       const ArchSpec* arch, 
+                                                                       lldb_private::Connection* connection) {
+  bool create = force;
+  if (!create) {
+    create = !arch->TripleVendorWasSpecified() && !arch->TripleOSWasSpecified();
+  }
+  if (create) {
+    auto gdbserver = new PlatformRemoteGDBServer();
+    gdbserver->SetConnection(std::unique_ptr<lldb_private::Connection>(connection));
+    return PlatformSP(gdbserver);
+  }
   return PlatformSP();
 }
 
@@ -131,7 +147,7 @@ Status PlatformRemoteGDBServer::GetFileWithUUID(const FileSpec &platform_file,
 
 /// Default Constructor
 PlatformRemoteGDBServer::PlatformRemoteGDBServer()
-    : Platform(/*is_host=*/false) {}
+    : Platform(/*is_host=*/false), m_dev(nullptr), m_dev_lldb(nullptr) {}
 
 /// Destructor.
 ///
@@ -176,6 +192,7 @@ FileSpec PlatformRemoteGDBServer::GetRemoteWorkingDirectory() {
   if (IsConnected()) {
     Log *log = GetLog(LLDBLog::Platform);
     FileSpec working_dir;
+    m_gdb_client_up->GetConnection();
     if (m_gdb_client_up->GetWorkingDir(working_dir) && log)
       LLDB_LOGF(log,
                 "PlatformRemoteGDBServer::GetRemoteWorkingDirectory() -> '%s'",
@@ -239,8 +256,54 @@ Status PlatformRemoteGDBServer::ConnectRemote(Args &args) {
       std::make_unique<process_gdb_remote::GDBRemoteCommunicationClient>();
   client_up->SetPacketTimeout(
       process_gdb_remote::ProcessGDBRemote::GetPacketTimeout());
-  client_up->SetConnection(std::make_unique<ConnectionFileDescriptor>());
-  client_up->Connect(url, &error);
+
+  if (m_platform_scheme == "ios" || m_platform_scheme == "android")
+  {
+    client_up->SetConnection(std::make_unique<ConnectionRemoteIOS>());
+    client_up->Connect(url, &error);
+  }
+  else{
+    client_up->SetConnection(std::make_unique<ConnectionFileDescriptor>());
+    client_up->Connect(url, &error);
+  }
+
+
+  if (error.Fail())
+    return error;
+
+  if (client_up->HandshakeWithServer(&error)) {
+    m_gdb_client_up = std::move(client_up);
+    m_gdb_client_up->GetHostInfo();
+    // If a working directory was set prior to connecting, send it down
+    // now.
+    if (m_working_dir)
+      m_gdb_client_up->SetWorkingDir(m_working_dir);
+
+    m_supported_architectures.clear();
+    ArchSpec remote_arch = m_gdb_client_up->GetSystemArchitecture();
+    if (remote_arch) {
+      m_supported_architectures.push_back(remote_arch);
+      if (remote_arch.GetTriple().isArch64Bit())
+        m_supported_architectures.push_back(
+            ArchSpec(remote_arch.GetTriple().get32BitArchVariant()));
+    }
+  } else {
+    client_up->Disconnect();
+    if (error.Success())
+      error.SetErrorString("handshake failed");
+  }
+  return error;
+}
+
+Status PlatformRemoteGDBServer::SetConnection(std::unique_ptr<Connection> connection)
+{
+  Status error;
+  auto client_up =
+      std::make_unique<process_gdb_remote::GDBRemoteCommunicationClient>();
+  client_up->SetPacketTimeout(
+      process_gdb_remote::ProcessGDBRemote::GetPacketTimeout());
+
+  client_up->SetConnection(move(connection));
 
   if (error.Fail())
     return error;
