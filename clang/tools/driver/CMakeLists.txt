@@ -23,7 +23,7 @@ if(CLANG_PLUGIN_SUPPORT)
   set(support_plugins SUPPORT_PLUGINS)
 endif()
 
-add_clang_tool(clang
+add_clang_tool(mixstudio-clang
   driver.cpp
   cc1_main.cpp
   cc1as_main.cpp
@@ -35,7 +35,7 @@ add_clang_tool(clang
   GENERATE_DRIVER
   )
 
-clang_target_link_libraries(clang
+clang_target_link_libraries(mixstudio-clang
   PRIVATE
   clangBasic
   clangCodeGen
@@ -48,15 +48,15 @@ clang_target_link_libraries(clang
 if(WIN32 AND NOT CYGWIN)
   # Prevent versioning if the buildhost is targeting for Win32.
 else()
-  set_target_properties(clang PROPERTIES VERSION ${CLANG_EXECUTABLE_VERSION})
+  set_target_properties(mixstudio-clang PROPERTIES VERSION ${CLANG_EXECUTABLE_VERSION})
 endif()
 
 # Support plugins.
 if(CLANG_PLUGIN_SUPPORT)
-  export_executable_symbols_for_plugins(clang)
+  export_executable_symbols_for_plugins(mixstudio-clang)
 endif()
 
-add_dependencies(clang clang-resource-headers)
+add_dependencies(mixstudio-clang clang-resource-headers)
 
 if(NOT CLANG_LINKS_TO_CREATE)
   set(CLANG_LINKS_TO_CREATE clang++ clang-cl clang-cpp)
@@ -67,7 +67,7 @@ if (CLANG_ENABLE_HLSL)
 endif()
 
 foreach(link ${CLANG_LINKS_TO_CREATE} ${HLSL_LINK})
-  add_clang_symlink(${link} clang)
+  add_clang_symlink(${link} mixstudio-clang)
 endforeach()
 
 # Configure plist creation for OS X.
@@ -118,7 +118,7 @@ if(CLANG_ORDER_FILE AND
   if("${ORDER_FILE}" STREQUAL "\n")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CLANG_ORDER_FILE})
   elseif(LINKER_ORDER_FILE_WORKS)
-    target_link_libraries(clang PRIVATE ${LINKER_ORDER_FILE_OPTION})
-    set_target_properties(clang PROPERTIES LINK_DEPENDS ${CLANG_ORDER_FILE})
+    target_link_libraries(mixstudio-clang PRIVATE ${LINKER_ORDER_FILE_OPTION})
+    set_target_properties(mixstudio-clang PROPERTIES LINK_DEPENDS ${CLANG_ORDER_FILE})
   endif()
 endif()

@@ -16,7 +16,7 @@ set(CLANG_OFFLOAD_BUNDLER_LIB_DEPS
   clangDriver
   )
 
-add_dependencies(clang clang-offload-bundler)
+add_dependencies(mixstudio-clang clang-offload-bundler)
 
 clang_target_link_libraries(clang-offload-bundler
   PRIVATE
