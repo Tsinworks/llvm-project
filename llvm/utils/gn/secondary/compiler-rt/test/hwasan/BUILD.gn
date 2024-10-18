@@ -37,6 +37,7 @@ if (current_toolchain != host_toolchain) {
       ":lit_site_cfg",
       "//compiler-rt/include($host_toolchain)",
       "//compiler-rt/lib/cfi:ignorelist($host_toolchain)",
+      "//compiler-rt/lib/hwasan:hwasan_preinit",
       "//compiler-rt/lib/hwasan:hwasan_shared",
       "//compiler-rt/test:lit_common_configured",
       "//llvm/utils/FileCheck($host_toolchain)",
@@ -66,7 +67,7 @@ if (llvm_build_AArch64 && android_ndk_path != "") {
 }
 
 group("hwasan") {
-  deps = []
+  deps = [ "//compiler-rt/lib/hwasan/scripts:hwasan_symbolize" ]
   foreach(toolchain, supported_toolchains) {
     deps += [ ":hwasan_toolchain($toolchain)" ]
   }

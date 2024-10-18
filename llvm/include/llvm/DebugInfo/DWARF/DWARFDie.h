@@ -10,7 +10,6 @@
 #define LLVM_DEBUGINFO_DWARF_DWARFDIE_H
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/BinaryFormat/Dwarf.h"
@@ -18,7 +17,7 @@
 #include "llvm/DebugInfo/DWARF/DWARFAddressRange.h"
 #include "llvm/DebugInfo/DWARF/DWARFAttribute.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugInfoEntry.h"
-#include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
+#include "llvm/DebugInfo/DWARF/DWARFLocationExpression.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -45,6 +44,7 @@ class DWARFDie {
   const DWARFDebugInfoEntry *Die = nullptr;
 
 public:
+  using DWARFFormValue = llvm::DWARFFormValue;
   DWARFDie() = default;
   DWARFDie(DWARFUnit *Unit, const DWARFDebugInfoEntry *D) : U(Unit), Die(D) {}
 
@@ -139,7 +139,7 @@ public:
   /// \param Attr the attribute to extract.
   /// \returns an optional DWARFFormValue that will have the form value if the
   /// attribute was successfully extracted.
-  Optional<DWARFFormValue> find(dwarf::Attribute Attr) const;
+  std::optional<DWARFFormValue> find(dwarf::Attribute Attr) const;
 
   /// Extract the first value of any attribute in Attrs from this DIE.
   ///
@@ -150,9 +150,9 @@ public:
   ///
   /// \param Attrs an array of DWARF attribute to look for.
   /// \returns an optional that has a valid DWARFFormValue for the first
-  /// matching attribute in Attrs, or None if none of the attributes in Attrs
-  /// exist in this DIE.
-  Optional<DWARFFormValue> find(ArrayRef<dwarf::Attribute> Attrs) const;
+  /// matching attribute in Attrs, or std::nullopt if none of the attributes in
+  /// Attrs exist in this DIE.
+  std::optional<DWARFFormValue> find(ArrayRef<dwarf::Attribute> Attrs) const;
 
   /// Extract the first value of any attribute in Attrs from this DIE and
   /// recurse into any DW_AT_specification or DW_AT_abstract_origin referenced
@@ -160,10 +160,10 @@ public:
   ///
   /// \param Attrs an array of DWARF attribute to look for.
   /// \returns an optional that has a valid DWARFFormValue for the first
-  /// matching attribute in Attrs, or None if none of the attributes in Attrs
-  /// exist in this DIE or in any DW_AT_specification or DW_AT_abstract_origin
-  /// DIEs.
-  Optional<DWARFFormValue>
+  /// matching attribute in Attrs, or std::nullopt if none of the attributes in
+  /// Attrs exist in this DIE or in any DW_AT_specification or
+  /// DW_AT_abstract_origin DIEs.
+  std::optional<DWARFFormValue>
   findRecursively(ArrayRef<dwarf::Attribute> Attrs) const;
 
   /// Extract the specified attribute from this DIE as the referenced DIE.
@@ -184,14 +184,16 @@ public:
 
   DWARFDie resolveTypeUnitReference() const;
 
+  DWARFDie resolveReferencedType(dwarf::Attribute Attr) const;
+  DWARFDie resolveReferencedType(const DWARFFormValue &V) const;
   /// Extract the range base attribute from this DIE as absolute section offset.
   ///
   /// This is a utility function that checks for either the DW_AT_rnglists_base
   /// or DW_AT_GNU_ranges_base attribute.
   ///
   /// \returns anm optional absolute section offset value for the attribute.
-  Optional<uint64_t> getRangesBaseAttribute() const;
-  Optional<uint64_t> getLocBaseAttribute() const;
+  std::optional<uint64_t> getRangesBaseAttribute() const;
+  std::optional<uint64_t> getLocBaseAttribute() const;
 
   /// Get the DW_AT_high_pc attribute value as an address.
   ///
@@ -203,7 +205,7 @@ public:
   ///
   /// \param LowPC the low PC that might be needed to calculate the high PC.
   /// \returns an optional address value for the attribute.
-  Optional<uint64_t> getHighPC(uint64_t LowPC) const;
+  std::optional<uint64_t> getHighPC(uint64_t LowPC) const;
 
   /// Retrieves DW_AT_low_pc and DW_AT_high_pc from CU.
   /// Returns true if both attributes are present.
@@ -279,6 +281,13 @@ public:
   ///
   /// \returns an iterator range for the attributes of the current DIE.
   iterator_range<attribute_iterator> attributes() const;
+
+  /// Gets the type size (in bytes) for this DIE.
+  ///
+  /// \param PointerSize the pointer size of the containing CU.
+  /// \returns if this is a type DIE, or this DIE contains a DW_AT_type, returns
+  /// the size of the type.
+  std::optional<uint64_t> getTypeSize(uint64_t PointerSize);
 
   class iterator;
 
@@ -463,12 +472,16 @@ inline bool operator!=(const std::reverse_iterator<DWARFDie::iterator> &LHS,
 }
 
 inline std::reverse_iterator<DWARFDie::iterator> DWARFDie::rbegin() const {
-  return llvm::make_reverse_iterator(end());
+  return std::make_reverse_iterator(end());
 }
 
 inline std::reverse_iterator<DWARFDie::iterator> DWARFDie::rend() const {
-  return llvm::make_reverse_iterator(begin());
+  return std::make_reverse_iterator(begin());
 }
+
+void dumpTypeQualifiedName(const DWARFDie &DIE, raw_ostream &OS);
+void dumpTypeUnqualifiedName(const DWARFDie &DIE, raw_ostream &OS,
+                             std::string *OriginalFullName = nullptr);
 
 } // end namespace llvm
 

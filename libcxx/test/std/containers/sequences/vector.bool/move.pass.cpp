@@ -18,7 +18,7 @@
 #include "test_allocator.h"
 #include "min_allocator.h"
 
-int main(int, char**)
+TEST_CONSTEXPR_CXX20 bool tests()
 {
     test_allocator_statistics alloc_stats;
     {
@@ -80,16 +80,26 @@ int main(int, char**)
       assert(alloc_stats.copied == 0);
       assert(alloc_stats.moved == 1);
       {
-        const AllocT& a = v.get_allocator();
-        assert(a.get_id() == test_alloc_base::moved_value);
-        assert(a.get_data() == test_alloc_base::moved_value);
-      }
-      {
-        const AllocT& a = v2.get_allocator();
-        assert(a.get_id() == 101);
-        assert(a.get_data() == 42);
+        const AllocT& a1 = v.get_allocator();
+        assert(a1.get_id() == test_alloc_base::moved_value);
+        assert(a1.get_data() == 42);
+
+        const AllocT& a2 = v2.get_allocator();
+        assert(a2.get_id() == 101);
+        assert(a2.get_data() == 42);
+
+        assert(a1 == a2);
       }
     }
 
-  return 0;
+    return true;
+}
+
+int main(int, char**)
+{
+    tests();
+#if TEST_STD_VER > 17
+    static_assert(tests());
+#endif
+    return 0;
 }

@@ -56,7 +56,7 @@ public:
   void setNegated(bool negated = true) { Negated = negated; }
 
   void printImpl(raw_ostream &OS, const MCAsmInfo *MAI) const override;
-  bool evaluateAsRelocatableImpl(MCValue &Res, const MCAsmLayout *Layout,
+  bool evaluateAsRelocatableImpl(MCValue &Res, const MCAssembler *Asm,
                                  const MCFixup *Fixup) const override;
 
   void visitUsedExpr(MCStreamer &streamer) const override;
@@ -84,7 +84,7 @@ private:
 private:
   explicit AVRMCExpr(VariantKind Kind, const MCExpr *Expr, bool Negated)
       : Kind(Kind), SubExpr(Expr), Negated(Negated) {}
-  ~AVRMCExpr() {}
+  ~AVRMCExpr() = default;
 };
 
 } // end namespace llvm

@@ -13,7 +13,7 @@
 #include "lldb/Core/Declaration.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/Value.h"
-#include "lldb/Expression/DWARFExpression.h"
+#include "lldb/Expression/DWARFExpressionList.h"
 #include "lldb/Symbol/Function.h"
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/SymbolContext.h"
@@ -35,6 +35,7 @@
 
 #include <cassert>
 #include <memory>
+#include <optional>
 
 namespace lldb_private {
 class ExecutionContextScope;
@@ -93,19 +94,23 @@ ConstString ValueObjectVariable::GetQualifiedTypeName() {
   return ConstString();
 }
 
-size_t ValueObjectVariable::CalculateNumChildren(uint32_t max) {
+llvm::Expected<uint32_t>
+ValueObjectVariable::CalculateNumChildren(uint32_t max) {
   CompilerType type(GetCompilerType());
 
   if (!type.IsValid())
-    return 0;
+    return llvm::make_error<llvm::StringError>("invalid type",
+                                               llvm::inconvertibleErrorCode());
 
   ExecutionContext exe_ctx(GetExecutionContextRef());
   const bool omit_empty_base_classes = true;
   auto child_count = type.GetNumChildren(omit_empty_base_classes, &exe_ctx);
-  return child_count <= max ? child_count : max;
+  if (!child_count)
+    return child_count;
+  return *child_count <= max ? *child_count : max;
 }
 
-llvm::Optional<uint64_t> ValueObjectVariable::GetByteSize() {
+std::optional<uint64_t> ValueObjectVariable::GetByteSize() {
   ExecutionContext exe_ctx(GetExecutionContextRef());
 
   CompilerType type(GetCompilerType());
@@ -127,18 +132,17 @@ bool ValueObjectVariable::UpdateValue() {
   m_error.Clear();
 
   Variable *variable = m_variable_sp.get();
-  DWARFExpression &expr = variable->LocationExpression();
+  DWARFExpressionList &expr_list = variable->LocationExpressionList();
 
   if (variable->GetLocationIsConstantValueData()) {
     // expr doesn't contain DWARF bytes, it contains the constant variable
     // value bytes themselves...
-    if (expr.GetExpressionData(m_data)) {
-       if (m_data.GetDataStart() && m_data.GetByteSize())
+    if (expr_list.GetExpressionData(m_data)) {
+      if (m_data.GetDataStart() && m_data.GetByteSize())
         m_value.SetBytes(m_data.GetDataStart(), m_data.GetByteSize());
       m_value.SetContext(Value::ContextType::Variable, variable);
-    }
-    else
-      m_error.SetErrorString("empty constant data");
+    } else
+      m_error = Status::FromErrorString("empty constant data");
     // constant bytes can't be edited - sorry
     m_resolved_value.SetContext(Value::ContextType::Invalid, nullptr);
   } else {
@@ -151,7 +155,7 @@ bool ValueObjectVariable::UpdateValue() {
       m_data.SetAddressByteSize(target->GetArchitecture().GetAddressByteSize());
     }
 
-    if (expr.IsLocationList()) {
+    if (!expr_list.IsAlwaysValidSingleExpr()) {
       SymbolContext sc;
       variable->CalculateSymbolContext(&sc);
       if (sc.function)
@@ -160,8 +164,11 @@ bool ValueObjectVariable::UpdateValue() {
                 target);
     }
     Value old_value(m_value);
-    if (expr.Evaluate(&exe_ctx, nullptr, loclist_base_load_addr, nullptr,
-                      nullptr, m_value, &m_error)) {
+    llvm::Expected<Value> maybe_value = expr_list.Evaluate(
+        &exe_ctx, nullptr, loclist_base_load_addr, nullptr, nullptr);
+
+    if (maybe_value) {
+      m_value = *maybe_value;
       m_resolved_value = m_value;
       m_value.SetContext(Value::ContextType::Variable, variable);
 
@@ -197,7 +204,7 @@ bool ValueObjectVariable::UpdateValue() {
 
       switch (value_type) {
       case Value::ValueType::Invalid:
-        m_error.SetErrorString("invalid value");
+        m_error = Status::FromErrorString("invalid value");
         break;
       case Value::ValueType::Scalar:
         // The variable value is in the Scalar value inside the m_value. We can
@@ -242,11 +249,12 @@ bool ValueObjectVariable::UpdateValue() {
 
       SetValueIsValid(m_error.Success());
     } else {
+      m_error = Status::FromError(maybe_value.takeError());
       // could not find location, won't allow editing
       m_resolved_value.SetContext(Value::ContextType::Invalid, nullptr);
     }
   }
-  
+
   return m_error.Success();
 }
 
@@ -357,7 +365,7 @@ const char *ValueObjectVariable::GetLocationAsCString() {
 bool ValueObjectVariable::SetValueFromCString(const char *value_str,
                                               Status &error) {
   if (!UpdateValueIfNeeded()) {
-    error.SetErrorString("unable to update value before writing");
+    error = Status::FromErrorString("unable to update value before writing");
     return false;
   }
 
@@ -367,7 +375,7 @@ bool ValueObjectVariable::SetValueFromCString(const char *value_str,
     RegisterContext *reg_ctx = exe_ctx.GetRegisterContext();
     RegisterValue reg_value;
     if (!reg_info || !reg_ctx) {
-      error.SetErrorString("unable to retrieve register info");
+      error = Status::FromErrorString("unable to retrieve register info");
       return false;
     }
     error = reg_value.SetValueFromString(reg_info, llvm::StringRef(value_str));
@@ -377,7 +385,7 @@ bool ValueObjectVariable::SetValueFromCString(const char *value_str,
       SetNeedsUpdate();
       return true;
     } else {
-      error.SetErrorString("unable to write back to register");
+      error = Status::FromErrorString("unable to write back to register");
       return false;
     }
   } else
@@ -386,7 +394,7 @@ bool ValueObjectVariable::SetValueFromCString(const char *value_str,
 
 bool ValueObjectVariable::SetData(DataExtractor &data, Status &error) {
   if (!UpdateValueIfNeeded()) {
-    error.SetErrorString("unable to update value before writing");
+    error = Status::FromErrorString("unable to update value before writing");
     return false;
   }
 
@@ -396,17 +404,17 @@ bool ValueObjectVariable::SetData(DataExtractor &data, Status &error) {
     RegisterContext *reg_ctx = exe_ctx.GetRegisterContext();
     RegisterValue reg_value;
     if (!reg_info || !reg_ctx) {
-      error.SetErrorString("unable to retrieve register info");
+      error = Status::FromErrorString("unable to retrieve register info");
       return false;
     }
-    error = reg_value.SetValueFromData(reg_info, data, 0, true);
+    error = reg_value.SetValueFromData(*reg_info, data, 0, true);
     if (error.Fail())
       return false;
     if (reg_ctx->WriteRegister(reg_info, reg_value)) {
       SetNeedsUpdate();
       return true;
     } else {
-      error.SetErrorString("unable to write back to register");
+      error = Status::FromErrorString("unable to write back to register");
       return false;
     }
   } else

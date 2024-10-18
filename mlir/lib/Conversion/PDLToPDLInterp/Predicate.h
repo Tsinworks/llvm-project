@@ -47,11 +47,14 @@ enum Kind : unsigned {
   OperandPos,
   OperandGroupPos,
   AttributePos,
+  ConstraintResultPos,
   ResultPos,
   ResultGroupPos,
   TypePos,
   AttributeLiteralPos,
   TypeLiteralPos,
+  UsersPos,
+  ForEachPos,
 
   // Questions, ordered by dependency and decreasing priority.
   IsNotNullQuestion,
@@ -186,6 +189,20 @@ struct AttributeLiteralPosition
 };
 
 //===----------------------------------------------------------------------===//
+// ForEachPosition
+
+/// A position describing an iterative choice of an operation.
+struct ForEachPosition : public PredicateBase<ForEachPosition, Position,
+                                              std::pair<Position *, unsigned>,
+                                              Predicates::ForEachPos> {
+  explicit ForEachPosition(const KeyTy &key) : Base(key) { parent = key.first; }
+
+  /// Returns the ID, for differentiating various loops.
+  /// For upward traversals, this is the index of the root.
+  unsigned getID() const { return key.second; }
+};
+
+//===----------------------------------------------------------------------===//
 // OperandPosition
 
 /// A position describing an operand of an operation.
@@ -206,7 +223,7 @@ struct OperandPosition
 struct OperandGroupPosition
     : public PredicateBase<
           OperandGroupPosition, Position,
-          std::tuple<OperationPosition *, Optional<unsigned>, bool>,
+          std::tuple<OperationPosition *, std::optional<unsigned>, bool>,
           Predicates::OperandGroupPos> {
   explicit OperandGroupPosition(const KeyTy &key);
 
@@ -215,9 +232,11 @@ struct OperandGroupPosition
     return llvm::hash_value(key);
   }
 
-  /// Returns the group number of this position. If None, this group refers to
-  /// all operands.
-  Optional<unsigned> getOperandGroupNumber() const { return std::get<1>(key); }
+  /// Returns the group number of this position. If std::nullopt, this group
+  /// refers to all operands.
+  std::optional<unsigned> getOperandGroupNumber() const {
+    return std::get<1>(key);
+  }
 
   /// Returns if the operand group has unknown size. If false, the operand group
   /// has at max one element.
@@ -229,14 +248,11 @@ struct OperandGroupPosition
 
 /// An operation position describes an operation node in the IR. Other position
 /// kinds are formed with respect to an operation position.
-struct OperationPosition
-    : public PredicateBase<OperationPosition, Position,
-                           std::tuple<Position *, Optional<unsigned>, unsigned>,
-                           Predicates::OperationPos> {
-  static constexpr unsigned kDown = std::numeric_limits<unsigned>::max();
-
+struct OperationPosition : public PredicateBase<OperationPosition, Position,
+                                                std::pair<Position *, unsigned>,
+                                                Predicates::OperationPos> {
   explicit OperationPosition(const KeyTy &key) : Base(key) {
-    parent = std::get<0>(key);
+    parent = key.first;
   }
 
   /// Returns a hash suitable for the given keytype.
@@ -246,31 +262,44 @@ struct OperationPosition
 
   /// Gets the root position.
   static OperationPosition *getRoot(StorageUniquer &uniquer) {
-    return Base::get(uniquer, nullptr, kDown, 0);
+    return Base::get(uniquer, nullptr, 0);
   }
 
-  /// Gets an downward operation position with the given parent.
+  /// Gets an operation position with the given parent.
   static OperationPosition *get(StorageUniquer &uniquer, Position *parent) {
-    return Base::get(uniquer, parent, kDown, parent->getOperationDepth() + 1);
+    return Base::get(uniquer, parent, parent->getOperationDepth() + 1);
   }
-
-  /// Gets an upward operation position with the given parent and operand.
-  static OperationPosition *get(StorageUniquer &uniquer, Position *parent,
-                                Optional<unsigned> operand) {
-    return Base::get(uniquer, parent, operand, parent->getOperationDepth() + 1);
-  }
-
-  /// Returns the operand index for an upward operation position.
-  Optional<unsigned> getIndex() const { return std::get<1>(key); }
-
-  /// Returns if this operation position is upward, accepting an input.
-  bool isUpward() const { return getIndex().getValueOr(0) != kDown; }
 
   /// Returns the depth of this position.
-  unsigned getDepth() const { return std::get<2>(key); }
+  unsigned getDepth() const { return key.second; }
 
   /// Returns if this operation position corresponds to the root.
   bool isRoot() const { return getDepth() == 0; }
+
+  /// Returns if this operation represents an operand defining op.
+  bool isOperandDefiningOp() const;
+};
+
+//===----------------------------------------------------------------------===//
+// ConstraintPosition
+
+struct ConstraintQuestion;
+
+/// A position describing the result of a native constraint. It saves the
+/// corresponding ConstraintQuestion and result index to enable referring
+/// back to them
+struct ConstraintPosition
+    : public PredicateBase<ConstraintPosition, Position,
+                           std::pair<ConstraintQuestion *, unsigned>,
+                           Predicates::ConstraintResultPos> {
+  using PredicateBase::PredicateBase;
+
+  /// Returns the ConstraintQuestion to enable keeping track of the native
+  /// constraint this position stems from.
+  ConstraintQuestion *getQuestion() const { return key.first; }
+
+  // Returns the result index of this position
+  unsigned getIndex() const { return key.second; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -294,7 +323,7 @@ struct ResultPosition
 struct ResultGroupPosition
     : public PredicateBase<
           ResultGroupPosition, Position,
-          std::tuple<OperationPosition *, Optional<unsigned>, bool>,
+          std::tuple<OperationPosition *, std::optional<unsigned>, bool>,
           Predicates::ResultGroupPos> {
   explicit ResultGroupPosition(const KeyTy &key) : Base(key) {
     parent = std::get<0>(key);
@@ -305,9 +334,11 @@ struct ResultGroupPosition
     return llvm::hash_value(key);
   }
 
-  /// Returns the group number of this position. If None, this group refers to
-  /// all results.
-  Optional<unsigned> getResultGroupNumber() const { return std::get<1>(key); }
+  /// Returns the group number of this position. If std::nullopt, this group
+  /// refers to all results.
+  std::optional<unsigned> getResultGroupNumber() const {
+    return std::get<1>(key);
+  }
 
   /// Returns if the result group has unknown size. If false, the result group
   /// has at max one element.
@@ -338,6 +369,26 @@ struct TypeLiteralPosition
     : public PredicateBase<TypeLiteralPosition, Position, Attribute,
                            Predicates::TypeLiteralPos> {
   using PredicateBase::PredicateBase;
+};
+
+//===----------------------------------------------------------------------===//
+// UsersPosition
+
+/// A position describing the users of a value or a range of values. The second
+/// value in the key indicates whether we choose users of a representative for
+/// a range (this is true, e.g., in the upward traversals).
+struct UsersPosition
+    : public PredicateBase<UsersPosition, Position, std::pair<Position *, bool>,
+                           Predicates::UsersPos> {
+  explicit UsersPosition(const KeyTy &key) : Base(key) { parent = key.first; }
+
+  /// Returns a hash suitable for the given keytype.
+  static llvm::hash_code hashKey(const KeyTy &key) {
+    return llvm::hash_value(key);
+  }
+
+  /// Indicates whether to compute a range of a representative.
+  bool useRepresentative() const { return key.second; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -419,11 +470,12 @@ struct AttributeQuestion
     : public PredicateBase<AttributeQuestion, Qualifier, void,
                            Predicates::AttributeQuestion> {};
 
-/// Apply a parameterized constraint to multiple position values.
+/// Apply a parameterized constraint to multiple position values and possibly
+/// produce results.
 struct ConstraintQuestion
     : public PredicateBase<
           ConstraintQuestion, Qualifier,
-          std::tuple<StringRef, ArrayRef<Position *>, Attribute>,
+          std::tuple<StringRef, ArrayRef<Position *>, ArrayRef<Type>, bool>,
           Predicates::ConstraintQuestion> {
   using Base::Base;
 
@@ -433,17 +485,24 @@ struct ConstraintQuestion
   /// Return the arguments of the constraint.
   ArrayRef<Position *> getArgs() const { return std::get<1>(key); }
 
-  /// Return the constant parameters of the constraint.
-  ArrayAttr getParams() const {
-    return std::get<2>(key).dyn_cast_or_null<ArrayAttr>();
-  }
+  /// Return the result types of the constraint.
+  ArrayRef<Type> getResultTypes() const { return std::get<2>(key); }
+
+  /// Return the negation status of the constraint.
+  bool getIsNegated() const { return std::get<3>(key); }
 
   /// Construct an instance with the given storage allocator.
   static ConstraintQuestion *construct(StorageUniquer::StorageAllocator &alloc,
                                        KeyTy key) {
     return Base::construct(alloc, KeyTy{alloc.copyInto(std::get<0>(key)),
                                         alloc.copyInto(std::get<1>(key)),
-                                        std::get<2>(key)});
+                                        alloc.copyInto(std::get<2>(key)),
+                                        std::get<3>(key)});
+  }
+
+  /// Returns a hash suitable for the given keytype.
+  static llvm::hash_code hashKey(const KeyTy &key) {
+    return llvm::hash_value(key);
   }
 };
 
@@ -496,6 +555,8 @@ public:
     // Register the types of Positions with the uniquer.
     registerParametricStorageType<AttributePosition>();
     registerParametricStorageType<AttributeLiteralPosition>();
+    registerParametricStorageType<ConstraintPosition>();
+    registerParametricStorageType<ForEachPosition>();
     registerParametricStorageType<OperandPosition>();
     registerParametricStorageType<OperandGroupPosition>();
     registerParametricStorageType<OperationPosition>();
@@ -503,6 +564,7 @@ public:
     registerParametricStorageType<ResultGroupPosition>();
     registerParametricStorageType<TypePosition>();
     registerParametricStorageType<TypeLiteralPosition>();
+    registerParametricStorageType<UsersPosition>();
 
     // Register the types of Questions with the uniquer.
     registerParametricStorageType<AttributeAnswer>();
@@ -550,12 +612,16 @@ public:
     return OperationPosition::get(uniquer, p);
   }
 
-  /// Returns the position of operation using the value at the given index.
-  OperationPosition *getUsersOp(Position *p, Optional<unsigned> operand) {
-    assert((isa<OperandPosition, OperandGroupPosition, ResultPosition,
-                ResultGroupPosition>(p)) &&
-           "expected result position");
-    return OperationPosition::get(uniquer, p, operand);
+  /// Returns the operation position equivalent to the given position.
+  OperationPosition *getPassthroughOp(Position *p) {
+    assert((isa<ForEachPosition>(p)) && "expected users position");
+    return OperationPosition::get(uniquer, p);
+  }
+
+  // Returns a position for a new value created by a constraint.
+  ConstraintPosition *getConstraintPosition(ConstraintQuestion *q,
+                                            unsigned index) {
+    return ConstraintPosition::get(uniquer, std::make_pair(q, index));
   }
 
   /// Returns an attribute position for an attribute of the given operation.
@@ -568,18 +634,22 @@ public:
     return AttributeLiteralPosition::get(uniquer, attr);
   }
 
+  Position *getForEach(Position *p, unsigned id) {
+    return ForEachPosition::get(uniquer, p, id);
+  }
+
   /// Returns an operand position for an operand of the given operation.
   Position *getOperand(OperationPosition *p, unsigned operand) {
     return OperandPosition::get(uniquer, p, operand);
   }
 
   /// Returns a position for a group of operands of the given operation.
-  Position *getOperandGroup(OperationPosition *p, Optional<unsigned> group,
+  Position *getOperandGroup(OperationPosition *p, std::optional<unsigned> group,
                             bool isVariadic) {
     return OperandGroupPosition::get(uniquer, p, group, isVariadic);
   }
   Position *getAllOperands(OperationPosition *p) {
-    return getOperandGroup(p, /*group=*/llvm::None, /*isVariadic=*/true);
+    return getOperandGroup(p, /*group=*/std::nullopt, /*isVariadic=*/true);
   }
 
   /// Returns a result position for a result of the given operation.
@@ -588,12 +658,12 @@ public:
   }
 
   /// Returns a position for a group of results of the given operation.
-  Position *getResultGroup(OperationPosition *p, Optional<unsigned> group,
+  Position *getResultGroup(OperationPosition *p, std::optional<unsigned> group,
                            bool isVariadic) {
     return ResultGroupPosition::get(uniquer, p, group, isVariadic);
   }
   Position *getAllResults(OperationPosition *p) {
-    return getResultGroup(p, /*group=*/llvm::None, /*isVariadic=*/true);
+    return getResultGroup(p, /*group=*/std::nullopt, /*isVariadic=*/true);
   }
 
   /// Returns a type position for the given entity.
@@ -603,6 +673,14 @@ public:
   /// as either a TypeAttr, or an ArrayAttr of TypeAttr.
   Position *getTypeLiteral(Attribute attr) {
     return TypeLiteralPosition::get(uniquer, attr);
+  }
+
+  /// Returns the users of a position using the value at the given operand.
+  UsersPosition *getUsers(Position *p, bool useRepresentative) {
+    assert((isa<OperandPosition, OperandGroupPosition, ResultPosition,
+                ResultGroupPosition>(p)) &&
+           "expected result position");
+    return UsersPosition::get(uniquer, p, useRepresentative);
   }
 
   //===--------------------------------------------------------------------===//
@@ -631,11 +709,11 @@ public:
   }
 
   /// Create a predicate that applies a generic constraint.
-  Predicate getConstraint(StringRef name, ArrayRef<Position *> pos,
-                          Attribute params) {
-    return {
-        ConstraintQuestion::get(uniquer, std::make_tuple(name, pos, params)),
-        TrueAnswer::get(uniquer)};
+  Predicate getConstraint(StringRef name, ArrayRef<Position *> args,
+                          ArrayRef<Type> resultTypes, bool isNegated) {
+    return {ConstraintQuestion::get(
+                uniquer, std::make_tuple(name, args, resultTypes, isNegated)),
+            TrueAnswer::get(uniquer)};
   }
 
   /// Create a predicate comparing a value with null.

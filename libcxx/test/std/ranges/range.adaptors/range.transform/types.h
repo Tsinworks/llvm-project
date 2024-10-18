@@ -9,6 +9,8 @@
 #ifndef TEST_STD_RANGES_RANGE_ADAPTORS_RANGE_TRANSFORM_TYPES_H
 #define TEST_STD_RANGES_RANGE_ADAPTORS_RANGE_TRANSFORM_TYPES_H
 
+#include <cstddef>
+
 #include "test_macros.h"
 #include "test_iterators.h"
 #include "test_range.h"
@@ -46,8 +48,8 @@ struct ForwardView : std::ranges::view_base {
   constexpr explicit ForwardView(int* ptr = globalBuff) : ptr_(ptr) {}
   constexpr ForwardView(ForwardView&&) = default;
   constexpr ForwardView& operator=(ForwardView&&) = default;
-  constexpr auto begin() const { return ForwardIter(ptr_); }
-  constexpr auto end() const { return ForwardIter(ptr_ + 8); }
+  constexpr auto begin() const { return forward_iterator<int*>(ptr_); }
+  constexpr auto end() const { return forward_iterator<int*>(ptr_ + 8); }
 };
 static_assert(std::ranges::view<ForwardView>);
 static_assert(std::ranges::forward_range<ForwardView>);
@@ -85,12 +87,11 @@ static_assert( std::ranges::borrowed_range<BorrowableRange>);
 struct InputView : std::ranges::view_base {
   int *ptr_;
   constexpr explicit InputView(int* ptr = globalBuff) : ptr_(ptr) {}
-  constexpr cpp20_input_iterator<int*> begin() const { return cpp20_input_iterator<int*>(ptr_); }
-  constexpr int *end() const { return ptr_ + 8; }
+  constexpr auto begin() const { return cpp20_input_iterator<int*>(ptr_); }
+  constexpr auto end() const { return sentinel_wrapper<cpp20_input_iterator<int*>>(cpp20_input_iterator<int*>(ptr_ + 8)); }
 };
-// TODO: remove these bogus operators
-constexpr bool operator==(const cpp20_input_iterator<int*> &lhs, int* rhs) { return lhs.base() == rhs; }
-constexpr bool operator==(int* lhs, const cpp20_input_iterator<int*> &rhs) { return rhs.base() == lhs; }
+static_assert( std::ranges::view<InputView>);
+static_assert(!std::ranges::sized_range<InputView>);
 
 struct SizedSentinelView : std::ranges::view_base {
   int count_;
@@ -99,15 +100,15 @@ struct SizedSentinelView : std::ranges::view_base {
   constexpr int *end() const { return globalBuff + count_; }
 };
 // TODO: remove these bogus operators
-constexpr auto operator- (const RandomAccessIter &lhs, int* rhs) { return lhs.base() - rhs; }
-constexpr auto operator- (int* lhs, const RandomAccessIter &rhs) { return lhs - rhs.base(); }
-constexpr bool operator==(const RandomAccessIter &lhs, int* rhs) { return lhs.base() == rhs; }
-constexpr bool operator==(int* lhs, const RandomAccessIter &rhs) { return rhs.base() == lhs; }
+constexpr auto operator- (const RandomAccessIter &lhs, int* rhs) { return base(lhs) - rhs; }
+constexpr auto operator- (int* lhs, const RandomAccessIter &rhs) { return lhs - base(rhs); }
+constexpr bool operator==(const RandomAccessIter &lhs, int* rhs) { return base(lhs) == rhs; }
+constexpr bool operator==(int* lhs, const RandomAccessIter &rhs) { return base(rhs) == lhs; }
 
 struct SizedSentinelNotConstView : std::ranges::view_base {
   ForwardIter begin() const;
   int *end() const;
-  size_t size();
+  std::size_t size();
 };
 // TODO: remove these bogus operators
 bool operator==(const ForwardIter &lhs, int* rhs);
@@ -116,12 +117,6 @@ bool operator==(int* lhs, const ForwardIter &rhs);
 struct Range {
   int *begin() const;
   int *end() const;
-};
-
-using CountedIter = stride_counting_iterator<forward_iterator<int*>>;
-struct CountedView : std::ranges::view_base {
-  constexpr CountedIter begin() const { return CountedIter(ForwardIter(globalBuff)); }
-  constexpr CountedIter end() const { return CountedIter(ForwardIter(globalBuff + 8)); }
 };
 
 struct TimesTwo {
@@ -134,6 +129,11 @@ struct PlusOneMutable {
 
 struct PlusOne {
   constexpr int operator()(int x) const { return x + 1; }
+};
+
+struct PlusOneMutableOverload {
+  constexpr int operator()(int x) const { return x + 1; }
+  constexpr int& operator()(int& x) { return ++x; }
 };
 
 struct Increment {

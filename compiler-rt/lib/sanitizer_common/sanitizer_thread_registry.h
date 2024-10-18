@@ -52,6 +52,7 @@ class ThreadContextBase {
   ThreadType thread_type;
 
   u32 parent_tid;
+  u32 stack_id;
   ThreadContextBase *next;  // For storing thread contexts in a list.
 
   atomic_uint32_t thread_destroyed; // To address race of Joined vs Finished
@@ -63,7 +64,7 @@ class ThreadContextBase {
   void SetFinished();
   void SetStarted(tid_t _os_id, ThreadType _thread_type, void *arg);
   void SetCreated(uptr _user_id, u64 _unique_id, bool _detached,
-                  u32 _parent_tid, void *arg);
+                  u32 _parent_tid, u32 _stack_tid, void *arg);
   void Reset();
 
   void SetDestroyed();
@@ -86,7 +87,7 @@ class ThreadContextBase {
 
 typedef ThreadContextBase* (*ThreadContextFactory)(u32 tid);
 
-class MUTEX ThreadRegistry {
+class SANITIZER_MUTEX ThreadRegistry {
  public:
   ThreadRegistry(ThreadContextFactory factory);
   ThreadRegistry(ThreadContextFactory factory, u32 max_threads,
@@ -95,18 +96,22 @@ class MUTEX ThreadRegistry {
                           uptr *alive = nullptr);
   uptr GetMaxAliveThreads();
 
-  void Lock() ACQUIRE() { mtx_.Lock(); }
-  void CheckLocked() const CHECK_LOCKED() { mtx_.CheckLocked(); }
-  void Unlock() RELEASE() { mtx_.Unlock(); }
+  void Lock() SANITIZER_ACQUIRE() { mtx_.Lock(); }
+  void CheckLocked() const SANITIZER_CHECK_LOCKED() { mtx_.CheckLocked(); }
+  void Unlock() SANITIZER_RELEASE() { mtx_.Unlock(); }
 
   // Should be guarded by ThreadRegistryLock.
   ThreadContextBase *GetThreadLocked(u32 tid) {
-    return threads_.empty() ? nullptr : threads_[tid];
+    return tid < threads_.size() ? threads_[tid] : nullptr;
   }
 
   u32 NumThreadsLocked() const { return threads_.size(); }
 
-  u32 CreateThread(uptr user_id, bool detached, u32 parent_tid, void *arg);
+  u32 CreateThread(uptr user_id, bool detached, u32 parent_tid, u32 stack_tid,
+                   void *arg);
+  u32 CreateThread(uptr user_id, bool detached, u32 parent_tid, void *arg) {
+    return CreateThread(user_id, detached, parent_tid, 0, arg);
+  }
 
   typedef void (*ThreadCallback)(ThreadContextBase *tctx, void *arg);
   // Invokes callback with a specified arg for each thread context.
@@ -132,6 +137,11 @@ class MUTEX ThreadRegistry {
   void StartThread(u32 tid, tid_t os_id, ThreadType thread_type, void *arg);
   u32 ConsumeThreadUserId(uptr user_id);
   void SetThreadUserId(u32 tid, uptr user_id);
+
+  // OnFork must be called in the child process after fork to purge old
+  // threads that don't exist anymore (except for the current thread tid).
+  // Returns number of alive threads before fork.
+  u32 OnFork(u32 tid);
 
  private:
   const ThreadContextFactory context_factory_;

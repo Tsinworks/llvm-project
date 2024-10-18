@@ -11,6 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <utility>
+
 #include "mlir/TableGen/Pattern.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -31,7 +33,7 @@ using llvm::formatv;
 //===----------------------------------------------------------------------===//
 
 bool DagLeaf::isUnspecified() const {
-  return dyn_cast_or_null<llvm::UnsetInit>(def);
+  return isa_and_nonnull<llvm::UnsetInit>(def);
 }
 
 bool DagLeaf::isOperandMatcher() const {
@@ -113,7 +115,8 @@ bool DagNode::isNativeCodeCall() const {
 
 bool DagNode::isOperation() const {
   return !isNativeCodeCall() && !isReplaceWithValue() &&
-         !isLocationDirective() && !isReturnTypeDirective() && !isEither();
+         !isLocationDirective() && !isReturnTypeDirective() && !isEither() &&
+         !isVariadic();
 }
 
 llvm::StringRef DagNode::getNativeCodeTemplate() const {
@@ -133,12 +136,12 @@ int DagNode::getNumReturnsOfNativeCode() const {
 llvm::StringRef DagNode::getSymbol() const { return node->getNameStr(); }
 
 Operator &DagNode::getDialectOp(RecordOperatorMap *mapper) const {
-  llvm::Record *opDef = cast<llvm::DefInit>(node->getOperator())->getDef();
-  auto it = mapper->find(opDef);
-  if (it != mapper->end())
-    return *it->second;
-  return *mapper->try_emplace(opDef, std::make_unique<Operator>(opDef))
-              .first->second;
+  const llvm::Record *opDef =
+      cast<llvm::DefInit>(node->getOperator())->getDef();
+  auto [it, inserted] = mapper->try_emplace(opDef);
+  if (inserted)
+    it->second = std::make_unique<Operator>(opDef);
+  return *it->second;
 }
 
 int DagNode::getNumOps() const {
@@ -191,6 +194,11 @@ bool DagNode::isEither() const {
   return dagOpDef->getName() == "either";
 }
 
+bool DagNode::isVariadic() const {
+  auto *dagOpDef = cast<llvm::DefInit>(node->getOperator())->getDef();
+  return dagOpDef->getName() == "variadic";
+}
+
 void DagNode::print(raw_ostream &os) const {
   if (node)
     node->print(os);
@@ -201,9 +209,8 @@ void DagNode::print(raw_ostream &os) const {
 //===----------------------------------------------------------------------===//
 
 StringRef SymbolInfoMap::getValuePackName(StringRef symbol, int *index) {
-  StringRef name, indexStr;
   int idx = -1;
-  std::tie(name, indexStr) = symbol.rsplit("__");
+  auto [name, indexStr] = symbol.rsplit("__");
 
   if (indexStr.consumeInteger(10, idx)) {
     // The second part is not an index; we return the whole symbol as-is.
@@ -215,8 +222,9 @@ StringRef SymbolInfoMap::getValuePackName(StringRef symbol, int *index) {
   return name;
 }
 
-SymbolInfoMap::SymbolInfo::SymbolInfo(const Operator *op, SymbolInfo::Kind kind,
-                                      Optional<DagAndConstant> dagAndConstant)
+SymbolInfoMap::SymbolInfo::SymbolInfo(
+    const Operator *op, SymbolInfo::Kind kind,
+    std::optional<DagAndConstant> dagAndConstant)
     : op(op), kind(kind), dagAndConstant(dagAndConstant) {}
 
 int SymbolInfoMap::SymbolInfo::getStaticValueCount() const {
@@ -234,7 +242,7 @@ int SymbolInfoMap::SymbolInfo::getStaticValueCount() const {
 }
 
 std::string SymbolInfoMap::SymbolInfo::getVarName(StringRef name) const {
-  return alternativeName.hasValue() ? alternativeName.getValue() : name.str();
+  return alternativeName ? *alternativeName : name.str();
 }
 
 std::string SymbolInfoMap::SymbolInfo::getVarTypeStr(StringRef name) const {
@@ -247,7 +255,7 @@ std::string SymbolInfoMap::SymbolInfo::getVarTypeStr(StringRef name) const {
           ->attr.getStorageType()
           .str();
     // TODO(suderman): Use a more exact type when available.
-    return "Attribute";
+    return "::mlir::Attribute";
   }
   case Kind::Operand: {
     // Use operand range for captured operands (to support potential variadic
@@ -294,9 +302,10 @@ std::string SymbolInfoMap::SymbolInfo::getValueAndRangeUse(
   case Kind::Operand: {
     assert(index < 0);
     auto *operand = op->getArg(getArgIndex()).get<NamedTypeConstraint *>();
-    // If this operand is variadic, then return a range. Otherwise, return the
-    // value itself.
-    if (operand->isVariableLength()) {
+    // If this operand is variadic and this SymbolInfo doesn't have a range
+    // index, then return the full variadic operand_range. Otherwise, return
+    // the value itself.
+    if (operand->isVariableLength() && !getVariadicSubIndex().has_value()) {
       auto repl = formatv(fmt, name);
       LLVM_DEBUG(llvm::dbgs() << repl << " (VariadicOperand)\n");
       return std::string(repl);
@@ -322,7 +331,7 @@ std::string SymbolInfoMap::SymbolInfo::getValueAndRangeUse(
     // means we want to capture the op itself.
     if (op->getNumResults() == 0) {
       LLVM_DEBUG(llvm::dbgs() << name << " (Op)\n");
-      return std::string(name);
+      return formatv(fmt, name);
     }
 
     // We are referencing all results of the multi-result op. A specific result
@@ -424,7 +433,8 @@ std::string SymbolInfoMap::SymbolInfo::getAllRangeUse(
 }
 
 bool SymbolInfoMap::bindOpArgument(DagNode node, StringRef symbol,
-                                   const Operator &op, int argIndex) {
+                                   const Operator &op, int argIndex,
+                                   std::optional<int> variadicSubIndex) {
   StringRef name = getValuePackName(symbol);
   if (name != symbol) {
     auto error = formatv(
@@ -432,9 +442,10 @@ bool SymbolInfoMap::bindOpArgument(DagNode node, StringRef symbol,
     PrintFatalError(loc, error);
   }
 
-  auto symInfo = op.getArg(argIndex).is<NamedAttribute *>()
-                     ? SymbolInfo::getAttr(&op, argIndex)
-                     : SymbolInfo::getOperand(node, &op, argIndex);
+  auto symInfo =
+      op.getArg(argIndex).is<NamedAttribute *>()
+          ? SymbolInfo::getAttr(&op, argIndex)
+          : SymbolInfo::getOperand(node, &op, argIndex, variadicSubIndex);
 
   std::string key = symbol.str();
   if (symbolInfoMap.count(key)) {
@@ -497,12 +508,15 @@ SymbolInfoMap::const_iterator SymbolInfoMap::find(StringRef key) const {
 
 SymbolInfoMap::const_iterator
 SymbolInfoMap::findBoundSymbol(StringRef key, DagNode node, const Operator &op,
-                               int argIndex) const {
-  return findBoundSymbol(key, SymbolInfo::getOperand(node, &op, argIndex));
+                               int argIndex,
+                               std::optional<int> variadicSubIndex) const {
+  return findBoundSymbol(
+      key, SymbolInfo::getOperand(node, &op, argIndex, variadicSubIndex));
 }
 
 SymbolInfoMap::const_iterator
-SymbolInfoMap::findBoundSymbol(StringRef key, SymbolInfo symbolInfo) const {
+SymbolInfoMap::findBoundSymbol(StringRef key,
+                               const SymbolInfo &symbolInfo) const {
   std::string name = getValuePackName(key).str();
   auto range = symbolInfoMap.equal_range(name);
 
@@ -663,7 +677,7 @@ std::vector<AppliedConstraint> Pattern::getConstraints() const {
             &def,
             "operands to additional constraints can only be symbol references");
       }
-      entities.push_back(std::string(argName->getValue()));
+      entities.emplace_back(argName->getValue());
     }
 
     ret.emplace_back(cast<llvm::DefInit>(dagInit->getOperator())->getDef(),
@@ -672,11 +686,21 @@ std::vector<AppliedConstraint> Pattern::getConstraints() const {
   return ret;
 }
 
+int Pattern::getNumSupplementalPatterns() const {
+  auto *results = def.getValueAsListInit("supplementalPatterns");
+  return results->size();
+}
+
+DagNode Pattern::getSupplementalPattern(unsigned index) const {
+  auto *results = def.getValueAsListInit("supplementalPatterns");
+  return DagNode(cast<llvm::DagInit>(results->getElement(index)));
+}
+
 int Pattern::getBenefit() const {
   // The initial benefit value is a heuristic with number of ops in the source
   // pattern.
   int initBenefit = getSourcePattern().getNumOps();
-  llvm::DagInit *delta = def.getValueAsDag("benefitDelta");
+  const llvm::DagInit *delta = def.getValueAsDag("benefitDelta");
   if (delta->getNumArgs() != 1 || !isa<llvm::IntInit>(delta->getArg(0))) {
     PrintFatalError(&def,
                     "The 'addBenefit' takes and only takes one integer value");
@@ -804,15 +828,43 @@ void Pattern::collectBoundSymbols(DagNode tree, SymbolInfoMap &infoMap,
     // The operand in `either` DAG should be bound to the operation in the
     // parent DagNode.
     auto collectSymbolInEither = [&](DagNode parent, DagNode tree,
-                                     int &opArgIdx) {
+                                     int opArgIdx) {
       for (int i = 0; i < tree.getNumArgs(); ++i, ++opArgIdx) {
         if (DagNode subTree = tree.getArgAsNestedDag(i)) {
           collectBoundSymbols(subTree, infoMap, isSrcPattern);
         } else {
           auto argName = tree.getArgName(i);
-          if (!argName.empty() && argName != "_")
+          if (!argName.empty() && argName != "_") {
             verifyBind(infoMap.bindOpArgument(parent, argName, op, opArgIdx),
                        argName);
+          }
+        }
+      }
+    };
+
+    // The operand in `variadic` DAG should be bound to the operation in the
+    // parent DagNode. The range index must be included as well to distinguish
+    // (potentially) repeating argName within the `variadic` DAG.
+    auto collectSymbolInVariadic = [&](DagNode parent, DagNode tree,
+                                       int opArgIdx) {
+      auto treeName = tree.getSymbol();
+      if (!treeName.empty()) {
+        // If treeName is specified, bind to the full variadic operand_range.
+        verifyBind(infoMap.bindOpArgument(parent, treeName, op, opArgIdx,
+                                          std::nullopt),
+                   treeName);
+      }
+
+      for (int i = 0; i < tree.getNumArgs(); ++i) {
+        if (DagNode subTree = tree.getArgAsNestedDag(i)) {
+          collectBoundSymbols(subTree, infoMap, isSrcPattern);
+        } else {
+          auto argName = tree.getArgName(i);
+          if (!argName.empty() && argName != "_") {
+            verifyBind(infoMap.bindOpArgument(parent, argName, op, opArgIdx,
+                                              /*variadicSubIndex=*/i),
+                       argName);
+          }
         }
       }
     };
@@ -821,6 +873,16 @@ void Pattern::collectBoundSymbols(DagNode tree, SymbolInfoMap &infoMap,
       if (auto treeArg = tree.getArgAsNestedDag(i)) {
         if (treeArg.isEither()) {
           collectSymbolInEither(tree, treeArg, opArgIdx);
+          // `either` DAG is *flattened*. For example,
+          //
+          //  (FooOp (either arg0, arg1), arg2)
+          //
+          //  can be viewed as:
+          //
+          //  (FooOp arg0, arg1, arg2)
+          ++opArgIdx;
+        } else if (treeArg.isVariadic()) {
+          collectSymbolInVariadic(tree, treeArg, opArgIdx);
         } else {
           // This DAG node argument is a DAG node itself. Go inside recursively.
           collectBoundSymbols(treeArg, infoMap, isSrcPattern);

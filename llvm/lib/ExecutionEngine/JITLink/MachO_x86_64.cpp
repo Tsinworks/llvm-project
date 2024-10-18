@@ -11,10 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ExecutionEngine/JITLink/MachO_x86_64.h"
+#include "llvm/ExecutionEngine/JITLink/DWARFRecordSectionSplitter.h"
 #include "llvm/ExecutionEngine/JITLink/x86_64.h"
 
+#include "DefineExternalSectionStartAndEndSymbols.h"
 #include "MachOLinkGraphBuilder.h"
-#include "PerGraphGOTAndPLTStubsBuilder.h"
 
 #define DEBUG_TYPE "jitlink"
 
@@ -25,9 +26,10 @@ namespace {
 
 class MachOLinkGraphBuilder_x86_64 : public MachOLinkGraphBuilder {
 public:
-  MachOLinkGraphBuilder_x86_64(const object::MachOObjectFile &Obj)
+  MachOLinkGraphBuilder_x86_64(const object::MachOObjectFile &Obj,
+                               SubtargetFeatures Features)
       : MachOLinkGraphBuilder(Obj, Triple("x86_64-apple-darwin"),
-                              x86_64::getEdgeKindName) {}
+                              std::move(Features), x86_64::getEdgeKindName) {}
 
 private:
   enum MachONormalizedRelocationType : unsigned {
@@ -119,7 +121,7 @@ private:
   // returns the edge kind and addend to be used.
   Expected<PairRelocInfo> parsePairRelocation(
       Block &BlockToFix, MachONormalizedRelocationType SubtractorKind,
-      const MachO::relocation_info &SubRI, JITTargetAddress FixupAddress,
+      const MachO::relocation_info &SubRI, orc::ExecutorAddr FixupAddress,
       const char *FixupContent, object::relocation_iterator &UnsignedRelItr,
       object::relocation_iterator &RelEnd) {
     using namespace support;
@@ -172,27 +174,47 @@ private:
         return ToSymbolSec.takeError();
       ToSymbol = getSymbolByAddress(*ToSymbolSec, ToSymbolSec->Address);
       assert(ToSymbol && "No symbol for section");
-      FixupValue -= ToSymbol->getAddress();
+      FixupValue -= ToSymbol->getAddress().getValue();
     }
 
     Edge::Kind DeltaKind;
     Symbol *TargetSymbol;
     uint64_t Addend;
+
+    bool FixingFromSymbol = true;
     if (&BlockToFix == &FromSymbol->getAddressable()) {
+      if (LLVM_UNLIKELY(&BlockToFix == &ToSymbol->getAddressable())) {
+        // From and To are symbols in the same block. Decide direction by offset
+        // instead.
+        if (ToSymbol->getAddress() > FixupAddress)
+          FixingFromSymbol = true;
+        else if (FromSymbol->getAddress() > FixupAddress)
+          FixingFromSymbol = false;
+        else
+          FixingFromSymbol = FromSymbol->getAddress() >= ToSymbol->getAddress();
+      } else
+        FixingFromSymbol = true;
+    } else {
+      if (&BlockToFix == &ToSymbol->getAddressable())
+        FixingFromSymbol = false;
+      else {
+        // BlockToFix was neither FromSymbol nor ToSymbol.
+        return make_error<JITLinkError>("SUBTRACTOR relocation must fix up "
+                                        "either 'A' or 'B' (or a symbol in one "
+                                        "of their alt-entry groups)");
+      }
+    }
+
+    if (FixingFromSymbol) {
       TargetSymbol = ToSymbol;
       DeltaKind = (SubRI.r_length == 3) ? x86_64::Delta64 : x86_64::Delta32;
       Addend = FixupValue + (FixupAddress - FromSymbol->getAddress());
       // FIXME: handle extern 'from'.
-    } else if (&BlockToFix == &ToSymbol->getAddressable()) {
+    } else {
       TargetSymbol = FromSymbol;
       DeltaKind =
           (SubRI.r_length == 3) ? x86_64::NegDelta64 : x86_64::NegDelta32;
       Addend = FixupValue - (FixupAddress - ToSymbol->getAddress());
-    } else {
-      // BlockToFix was neither FromSymbol nor ToSymbol.
-      return make_error<JITLinkError>("SUBTRACTOR relocation must fix up "
-                                      "either 'A' or 'B' (or a symbol in one "
-                                      "of their alt-entry chains)");
     }
 
     return PairRelocInfo(DeltaKind, TargetSymbol, Addend);
@@ -204,9 +226,9 @@ private:
 
     LLVM_DEBUG(dbgs() << "Processing relocations:\n");
 
-    for (auto &S : Obj.sections()) {
+    for (const auto &S : Obj.sections()) {
 
-      JITTargetAddress SectionAddress = S.getAddress();
+      orc::ExecutorAddr SectionAddress(S.getAddress());
 
       // Skip relocations virtual sections.
       if (S.isVirtual()) {
@@ -241,7 +263,7 @@ private:
         MachO::relocation_info RI = getRelocationInfo(RelItr);
 
         // Find the address of the value to fix up.
-        JITTargetAddress FixupAddress = SectionAddress + (uint32_t)RI.r_address;
+        auto FixupAddress = SectionAddress + (uint32_t)RI.r_address;
 
         LLVM_DEBUG({
           dbgs() << "  " << NSec->SectName << " + "
@@ -257,7 +279,7 @@ private:
           BlockToFix = &SymbolToFixOrErr->getBlock();
         }
 
-        if (FixupAddress + static_cast<JITTargetAddress>(1ULL << RI.r_length) >
+        if (FixupAddress + orc::ExecutorAddrDiff(1ULL << RI.r_length) >
             BlockToFix->getAddress() + BlockToFix->getContent().size())
           return make_error<JITLinkError>(
               "Relocation extends past end of fixup block");
@@ -343,7 +365,7 @@ private:
           Kind = x86_64::Pointer64;
           break;
         case MachOPointer64Anon: {
-          JITTargetAddress TargetAddress = *(const ulittle64_t *)FixupContent;
+          orc::ExecutorAddr TargetAddress(*(const ulittle64_t *)FixupContent);
           auto TargetNSec = findSectionByIndex(RI.r_symbolnum - 1);
           if (!TargetNSec)
             return TargetNSec.takeError();
@@ -367,8 +389,8 @@ private:
           Kind = x86_64::Delta32;
           break;
         case MachOPCRel32Anon: {
-          JITTargetAddress TargetAddress =
-              FixupAddress + 4 + *(const little32_t *)FixupContent;
+          orc::ExecutorAddr TargetAddress(FixupAddress + 4 +
+                                          *(const little32_t *)FixupContent);
           auto TargetNSec = findSectionByIndex(RI.r_symbolnum - 1);
           if (!TargetNSec)
             return TargetNSec.takeError();
@@ -384,10 +406,10 @@ private:
         case MachOPCRel32Minus1Anon:
         case MachOPCRel32Minus2Anon:
         case MachOPCRel32Minus4Anon: {
-          JITTargetAddress Delta =
-              4 + static_cast<JITTargetAddress>(
+          orc::ExecutorAddrDiff Delta =
+              4 + orc::ExecutorAddrDiff(
                       1ULL << (*MachORelocKind - MachOPCRel32Minus1Anon));
-          JITTargetAddress TargetAddress =
+          orc::ExecutorAddr TargetAddress =
               FixupAddress + Delta + *(const little32_t *)FixupContent;
           auto TargetNSec = findSectionByIndex(RI.r_symbolnum - 1);
           if (!TargetNSec)
@@ -466,7 +488,13 @@ createLinkGraphFromMachOObject_x86_64(MemoryBufferRef ObjectBuffer) {
   auto MachOObj = object::ObjectFile::createMachOObjectFile(ObjectBuffer);
   if (!MachOObj)
     return MachOObj.takeError();
-  return MachOLinkGraphBuilder_x86_64(**MachOObj).buildGraph();
+
+  auto Features = (*MachOObj)->getFeatures();
+  if (!Features)
+    return Features.takeError();
+
+  return MachOLinkGraphBuilder_x86_64(**MachOObj, std::move(*Features))
+      .buildGraph();
 }
 
 void link_MachO_x86_64(std::unique_ptr<LinkGraph> G,
@@ -475,7 +503,7 @@ void link_MachO_x86_64(std::unique_ptr<LinkGraph> G,
   PassConfiguration Config;
 
   if (Ctx->shouldAddDefaultTargetPasses(G->getTargetTriple())) {
-    // Add eh-frame passses.
+    // Add eh-frame passes.
     Config.PrePrunePasses.push_back(createEHFrameSplitterPass_MachO_x86_64());
     Config.PrePrunePasses.push_back(createEHFrameEdgeFixerPass_MachO_x86_64());
 
@@ -488,6 +516,11 @@ void link_MachO_x86_64(std::unique_ptr<LinkGraph> G,
       Config.PrePrunePasses.push_back(std::move(MarkLive));
     else
       Config.PrePrunePasses.push_back(markAllSymbolsLive);
+
+    // Resolve any external section start / end symbols.
+    Config.PostAllocationPasses.push_back(
+        createDefineExternalSectionStartAndEndSymbolsPass(
+            identifyMachOSectionStartAndEndSymbols));
 
     // Add an in-place GOT/Stubs pass.
     Config.PostPrunePasses.push_back(buildGOTAndStubs_MachO_x86_64);
@@ -504,12 +537,13 @@ void link_MachO_x86_64(std::unique_ptr<LinkGraph> G,
 }
 
 LinkGraphPassFunction createEHFrameSplitterPass_MachO_x86_64() {
-  return EHFrameSplitter("__TEXT,__eh_frame");
+  return DWARFRecordSectionSplitter("__TEXT,__eh_frame");
 }
 
 LinkGraphPassFunction createEHFrameEdgeFixerPass_MachO_x86_64() {
   return EHFrameEdgeFixer("__TEXT,__eh_frame", x86_64::PointerSize,
-                          x86_64::Delta64, x86_64::Delta32, x86_64::NegDelta32);
+                          x86_64::Pointer32, x86_64::Pointer64, x86_64::Delta32,
+                          x86_64::Delta64, x86_64::NegDelta32);
 }
 
 } // end namespace jitlink

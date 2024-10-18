@@ -11,9 +11,9 @@ add_mlir_conversion_library(MLIRComplexToLLVM
   Core
 
   LINK_LIBS PUBLIC
-  MLIRComplex
+  MLIRArithAttrToLLVMConversion
+  MLIRComplexDialect
   MLIRLLVMCommonConversion
-  MLIRLLVMIR
-  MLIRStandardOpsTransforms
+  MLIRLLVMDialect
   MLIRTransforms
   )

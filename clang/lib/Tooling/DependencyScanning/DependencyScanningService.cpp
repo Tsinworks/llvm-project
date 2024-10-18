@@ -14,10 +14,10 @@ using namespace tooling;
 using namespace dependencies;
 
 DependencyScanningService::DependencyScanningService(
-    ScanningMode Mode, ScanningOutputFormat Format, bool ReuseFileManager,
-    bool SkipExcludedPPRanges, bool OptimizeArgs)
-    : Mode(Mode), Format(Format), ReuseFileManager(ReuseFileManager),
-      SkipExcludedPPRanges(SkipExcludedPPRanges), OptimizeArgs(OptimizeArgs) {
+    ScanningMode Mode, ScanningOutputFormat Format,
+    ScanningOptimizations OptimizeArgs, bool EagerLoadModules, bool TraceVFS)
+    : Mode(Mode), Format(Format), OptimizeArgs(OptimizeArgs),
+      EagerLoadModules(EagerLoadModules), TraceVFS(TraceVFS) {
   // Initialize targets for object file support.
   llvm::InitializeAllTargets();
   llvm::InitializeAllTargetMCs();

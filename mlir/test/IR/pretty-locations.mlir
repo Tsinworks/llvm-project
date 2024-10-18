@@ -1,9 +1,9 @@
-// RUN: mlir-opt -allow-unregistered-dialect %s -mlir-print-debuginfo -mlir-pretty-debuginfo | FileCheck %s
+// RUN: mlir-opt -allow-unregistered-dialect %s -mlir-print-debuginfo -mlir-pretty-debuginfo -mlir-print-local-scope | FileCheck %s
 
 #set0 = affine_set<(d0) : (1 == 0)>
 
 // CHECK-LABEL: func @inline_notation
-func @inline_notation() -> i32 {
+func.func @inline_notation() -> i32 {
   // CHECK: -> i32 "foo"
   %1 = "foo"() : () -> i32 loc("foo")
 
@@ -23,6 +23,9 @@ func @inline_notation() -> i32 {
   // CHECK: } <"myPass">["foo", "foo2"]
   affine.if #set0(%2) {
   } loc(fused<"myPass">["foo", "foo2"])
+
+  // CHECK: "foo.op"() : () -> () #test.custom_location<"foo.mlir" * 1234>
+  "foo.op"() : () -> () loc(#test.custom_location<"foo.mlir" * 1234>)
 
   // CHECK: return %0 : i32 [unknown]
   return %1 : i32 loc(unknown)

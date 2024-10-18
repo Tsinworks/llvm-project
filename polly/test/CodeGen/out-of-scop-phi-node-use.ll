@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-codegen -S < %s | FileCheck %s
+; RUN: opt %loadNPMPolly -passes=polly-codegen -S < %s | FileCheck %s
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
@@ -10,7 +10,7 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK-NEXT:  %_s.sroa.343.0.ph5161118 = phi i32 [ undef, %for.cond ], [ %_s.sroa.343.0.ph5161118.ph.merge, %polly.merge_new_and_old ]
 
 ; CHECK-LABEL: polly.exiting:
-; CHECK-NEXT: %_s.sroa.343.0.ph5161118.ph.final_reload = load i32, i32* %_s.sroa.343.0.ph5161118.s2a
+; CHECK-NEXT: %_s.sroa.343.0.ph5161118.ph.final_reload = load i32, ptr %_s.sroa.343.0.ph5161118.s2a
 
 ; Function Attrs: nounwind uwtable
 define void @lzmaDecode() #0 {

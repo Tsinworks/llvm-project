@@ -129,9 +129,9 @@ define i32 @sink_sub_of_const_to_sub2(i32 %a, i32 %b) {
 define i32 @sink_sub_from_const_to_sub(i32 %a, i32 %b) {
 ; CHECK-LABEL: sink_sub_from_const_to_sub:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    add w8, w0, w1
-; CHECK-NEXT:    mov w9, #32
-; CHECK-NEXT:    sub w0, w9, w8
+; CHECK-NEXT:    mov w8, #32 // =0x20
+; CHECK-NEXT:    add w9, w0, w1
+; CHECK-NEXT:    sub w0, w8, w9
 ; CHECK-NEXT:    ret
   %t0 = sub i32 32, %a
   %r = sub i32 %t0, %b

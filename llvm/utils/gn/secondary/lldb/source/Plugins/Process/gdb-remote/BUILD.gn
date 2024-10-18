@@ -26,6 +26,7 @@ static_library("gdb-remote") {
     "//lldb/source/Target",
     "//lldb/source/Utility",
     "//llvm/lib/Support",
+    "//llvm/lib/TargetParser",
   ]
 
   # XXX if (have_libcompression) { deps += [ compression } }
@@ -36,12 +37,12 @@ static_library("gdb-remote") {
     "GDBRemoteCommunication.cpp",
     "GDBRemoteCommunicationClient.cpp",
     "GDBRemoteCommunicationHistory.cpp",
-    "GDBRemoteCommunicationReplayServer.cpp",
     "GDBRemoteCommunicationServer.cpp",
     "GDBRemoteCommunicationServerCommon.cpp",
     "GDBRemoteCommunicationServerLLGS.cpp",
     "GDBRemoteCommunicationServerPlatform.cpp",
     "GDBRemoteRegisterContext.cpp",
+    "GDBRemoteRegisterFallback.cpp",
     "ProcessGDBRemote.cpp",
     "ProcessGDBRemoteLog.cpp",
     "ThreadGDBRemote.cpp",

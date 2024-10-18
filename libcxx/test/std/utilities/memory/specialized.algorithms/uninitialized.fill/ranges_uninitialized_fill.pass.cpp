@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17
-// UNSUPPORTED: libcpp-no-concepts, libcpp-has-no-incomplete-ranges
 
 // <memory>
 
@@ -31,6 +30,7 @@
 #include "test_macros.h"
 #include "test_iterators.h"
 
+// TODO(varconst): consolidate the ADL checks into a single file.
 // Because this is a variable and not a function, it's guaranteed that ADL won't be used. However,
 // implementations are allowed to use a different mechanism to achieve this effect, so this check is
 // libc++-specific.
@@ -187,8 +187,7 @@ int main(int, char**) {
 
     Counted::throw_on = N; // When constructing the fourth object.
     try {
-      auto range = std::ranges::subrange(buf.begin(), buf.end());
-      std::ranges::uninitialized_fill(range, x);
+      std::ranges::uninitialized_fill(buf, x);
     } catch (...) {
     }
     assert(Counted::current_objects == 0);
@@ -198,35 +197,6 @@ int main(int, char**) {
     Counted::reset();
   }
 #endif // TEST_HAS_NO_EXCEPTIONS
-
-  // Works with const iterators, (iter, sentinel) overload.
-  {
-    constexpr int N = 5;
-    Buffer<Counted, N> buf;
-
-    std::ranges::uninitialized_fill(buf.cbegin(), buf.cend(), x);
-    assert(Counted::current_objects == N);
-    assert(Counted::total_objects == N);
-    assert(std::all_of(buf.begin(), buf.end(), pred));
-
-    std::destroy(buf.begin(), buf.end());
-    Counted::reset();
-  }
-
-  // Works with const iterators, (range) overload.
-  {
-    constexpr int N = 5;
-    Buffer<Counted, N> buf;
-
-    auto range = std::ranges::subrange(buf.cbegin(), buf.cend());
-    std::ranges::uninitialized_fill(range, x);
-    assert(Counted::current_objects == N);
-    assert(Counted::total_objects == N);
-    assert(std::all_of(buf.begin(), buf.end(), pred));
-
-    std::destroy(buf.begin(), buf.end());
-    Counted::reset();
-  }
 
   return 0;
 }

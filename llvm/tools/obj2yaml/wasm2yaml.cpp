@@ -10,6 +10,7 @@
 #include "llvm/Object/COFF.h"
 #include "llvm/ObjectYAML/WasmYAML.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/Support/YAMLTraits.h"
 
 using namespace llvm;
@@ -43,7 +44,7 @@ static WasmYAML::Table makeTable(uint32_t Index,
                                  const wasm::WasmTableType &Type) {
   WasmYAML::Table T;
   T.Index = Index;
-  T.ElemType = Type.ElemType;
+  T.ElemType = (uint32_t)Type.ElemType;
   T.TableLimits = makeLimits(Type.Limits);
   return T;
 }
@@ -123,7 +124,8 @@ WasmDumper::dumpCustomSection(const WasmSection &WasmSec) {
     }
 
     uint32_t SymbolIndex = 0;
-    for (const wasm::WasmSymbolInfo &Symbol : Obj.linkingData().SymbolTable) {
+    for (const object::SymbolRef &Sym : Obj.symbols()) {
+      const wasm::WasmSymbolInfo &Symbol = Obj.getWasmSymbol(Sym).Info;
       WasmYAML::SymbolInfo Info;
       Info.Index = SymbolIndex++;
       Info.Kind = static_cast<uint32_t>(Symbol.Kind);
@@ -204,7 +206,7 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
     std::unique_ptr<WasmYAML::Section> S;
     switch (WasmSec.Type) {
     case wasm::WASM_SEC_CUSTOM: {
-      if (WasmSec.Name.startswith("reloc.")) {
+      if (WasmSec.Name.starts_with("reloc.")) {
         // Relocations are attached the sections they apply to rather than
         // being represented as a custom section in the YAML output.
         continue;
@@ -298,7 +300,12 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
         G.Index = Global.Index;
         G.Type = Global.Type.Type;
         G.Mutable = Global.Type.Mutable;
-        G.InitExpr = Global.InitExpr;
+        G.Init.Extended = Global.InitExpr.Extended;
+        if (Global.InitExpr.Extended) {
+          G.Init.Body = Global.InitExpr.Body;
+        } else {
+          G.Init.Inst = Global.InitExpr.Inst;
+        }
         GlobalSec->Globals.push_back(G);
       }
       S = std::move(GlobalSec);
@@ -328,8 +335,13 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
         WasmYAML::ElemSegment Seg;
         Seg.Flags = Segment.Flags;
         Seg.TableNumber = Segment.TableNumber;
-        Seg.ElemKind = Segment.ElemKind;
-        Seg.Offset = Segment.Offset;
+        Seg.ElemKind = (uint32_t)Segment.ElemKind;
+        Seg.Offset.Extended = Segment.Offset.Extended;
+        if (Seg.Offset.Extended) {
+          Seg.Offset.Body = yaml::BinaryRef(Segment.Offset.Body);
+        } else {
+          Seg.Offset.Inst = Segment.Offset.Inst;
+        }
         append_range(Seg.Functions, Segment.Functions);
         ElemSec->Segments.push_back(Seg);
       }
@@ -360,7 +372,12 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
         Seg.SectionOffset = Segment.SectionOffset;
         Seg.InitFlags = Segment.Data.InitFlags;
         Seg.MemoryIndex = Segment.Data.MemoryIndex;
-        Seg.Offset = Segment.Data.Offset;
+        Seg.Offset.Extended = Segment.Data.Offset.Extended;
+        if (Seg.Offset.Extended) {
+          Seg.Offset.Body = yaml::BinaryRef(Segment.Data.Offset.Body);
+        } else {
+          Seg.Offset.Inst = Segment.Data.Offset.Inst;
+        }
         Seg.Content = yaml::BinaryRef(Segment.Data.Content);
         DataSec->Segments.push_back(Seg);
       }
@@ -377,6 +394,17 @@ ErrorOr<WasmYAML::Object *> WasmDumper::dump() {
       llvm_unreachable("Unknown section type");
       break;
     }
+
+    // Only propagate the section size encoding length if it's not the minimal
+    // size or 5 (the default "padded" value). This is to avoid having every
+    // YAML output polluted with this value when we usually don't care about it
+    // (and avoid rewriting all the test expectations).
+    if (WasmSec.HeaderSecSizeEncodingLen &&
+        WasmSec.HeaderSecSizeEncodingLen !=
+            getULEB128Size(WasmSec.Content.size()) &&
+        WasmSec.HeaderSecSizeEncodingLen != 5)
+      S->HeaderSecSizeEncodingLen = WasmSec.HeaderSecSizeEncodingLen;
+
     for (const wasm::WasmRelocation &Reloc : WasmSec.Relocations) {
       WasmYAML::Relocation R;
       R.Type = Reloc.Type;

@@ -161,10 +161,10 @@ namespace {
     }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.addRequired<MachineBranchProbabilityInfo>();
-      AU.addRequired<MachineDominatorTree>();
-      AU.addPreserved<MachineDominatorTree>();
-      AU.addRequired<MachineLoopInfo>();
+      AU.addRequired<MachineBranchProbabilityInfoWrapperPass>();
+      AU.addRequired<MachineDominatorTreeWrapperPass>();
+      AU.addPreserved<MachineDominatorTreeWrapperPass>();
+      AU.addRequired<MachineLoopInfoWrapperPass>();
       MachineFunctionPass::getAnalysisUsage(AU);
     }
 
@@ -601,8 +601,6 @@ bool HexagonEarlyIfConversion::visitBlock(MachineBasicBlock *B,
   // Visit all dominated blocks from the same loop first, then process B.
   MachineDomTreeNode *N = MDT->getNode(B);
 
-  using GTN = GraphTraits<MachineDomTreeNode *>;
-
   // We will change CFG/DT during this traversal, so take precautions to
   // avoid problems related to invalidated iterators. In fact, processing
   // a child C of B cannot cause another child to be removed, but it can
@@ -611,9 +609,9 @@ bool HexagonEarlyIfConversion::visitBlock(MachineBasicBlock *B,
   // prior to processing B, so there is no need to process it again.
   // Simply keep a list of children of B, and traverse that list.
   using DTNodeVectType = SmallVector<MachineDomTreeNode *, 4>;
-  DTNodeVectType Cn(GTN::child_begin(N), GTN::child_end(N));
-  for (DTNodeVectType::iterator I = Cn.begin(), E = Cn.end(); I != E; ++I) {
-    MachineBasicBlock *SB = (*I)->getBlock();
+  DTNodeVectType Cn(llvm::children<MachineDomTreeNode *>(N));
+  for (auto &I : Cn) {
+    MachineBasicBlock *SB = I->getBlock();
     if (!Deleted.count(SB))
       Changed |= visitBlock(SB, L);
   }
@@ -648,8 +646,8 @@ bool HexagonEarlyIfConversion::visitLoop(MachineLoop *L) {
              << "\n");
   bool Changed = false;
   if (L) {
-    for (MachineLoop::iterator I = L->begin(), E = L->end(); I != E; ++I)
-      Changed |= visitLoop(*I);
+    for (MachineLoop *I : *L)
+      Changed |= visitLoop(I);
   }
 
   MachineBasicBlock *EntryB = GraphTraits<MachineFunction*>::getEntryNode(MFN);
@@ -826,8 +824,8 @@ void HexagonEarlyIfConversion::updatePhiNodes(MachineBasicBlock *WhereB,
         FR = RO.getReg(), FSR = RO.getSubReg();
       else
         continue;
-      PN->RemoveOperand(i+1);
-      PN->RemoveOperand(i);
+      PN->removeOperand(i+1);
+      PN->removeOperand(i);
     }
     if (TR == 0)
       TR = SR, TSR = SSR;
@@ -964,8 +962,8 @@ void HexagonEarlyIfConversion::removeBlock(MachineBasicBlock *B) {
     using DTNodeVectType = SmallVector<MachineDomTreeNode *, 4>;
 
     DTNodeVectType Cn(GTN::child_begin(N), GTN::child_end(N));
-    for (DTNodeVectType::iterator I = Cn.begin(), E = Cn.end(); I != E; ++I) {
-      MachineBasicBlock *SB = (*I)->getBlock();
+    for (auto &I : Cn) {
+      MachineBasicBlock *SB = I->getBlock();
       MDT->changeImmediateDominator(SB, IDB);
     }
   }
@@ -973,8 +971,8 @@ void HexagonEarlyIfConversion::removeBlock(MachineBasicBlock *B) {
   while (!B->succ_empty())
     B->removeSuccessor(B->succ_begin());
 
-  for (auto I = B->pred_begin(), E = B->pred_end(); I != E; ++I)
-    (*I)->removeSuccessor(B, true);
+  for (MachineBasicBlock *Pred : B->predecessors())
+    Pred->removeSuccessor(B, true);
 
   Deleted.insert(B);
   MDT->eraseNode(B);
@@ -1056,16 +1054,17 @@ bool HexagonEarlyIfConversion::runOnMachineFunction(MachineFunction &MF) {
   TRI = ST.getRegisterInfo();
   MFN = &MF;
   MRI = &MF.getRegInfo();
-  MDT = &getAnalysis<MachineDominatorTree>();
-  MLI = &getAnalysis<MachineLoopInfo>();
-  MBPI = EnableHexagonBP ? &getAnalysis<MachineBranchProbabilityInfo>() :
-    nullptr;
+  MDT = &getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
+  MLI = &getAnalysis<MachineLoopInfoWrapperPass>().getLI();
+  MBPI = EnableHexagonBP
+             ? &getAnalysis<MachineBranchProbabilityInfoWrapperPass>().getMBPI()
+             : nullptr;
 
   Deleted.clear();
   bool Changed = false;
 
-  for (MachineLoopInfo::iterator I = MLI->begin(), E = MLI->end(); I != E; ++I)
-    Changed |= visitLoop(*I);
+  for (MachineLoop *L : *MLI)
+    Changed |= visitLoop(L);
   Changed |= visitLoop(nullptr);
 
   return Changed;

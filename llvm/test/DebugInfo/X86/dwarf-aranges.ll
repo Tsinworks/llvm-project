@@ -8,21 +8,21 @@
 ; -- alignment --
 ; CHECK-NEXT: .zero 4,255
 
-; <text section> - it should have made one span covering all functions in this CU.
-; CHECK-NEXT: .quad .Lfunc_begin0
-; CHECK-NEXT: .quad .Lsec_end0-.Lfunc_begin0
-
 ; <data section> - it should have made one span covering all vars in this CU.
 ; CHECK-NEXT: .quad some_data
-; CHECK-NEXT: .quad .Lsec_end1-some_data
+; CHECK-NEXT: .quad .Lsec_end0-some_data
 
 ; <other sections> - it should have made one span covering all vars in this CU.
 ; CHECK-NEXT: .quad some_other
-; CHECK-NEXT: .quad .Lsec_end2-some_other
+; CHECK-NEXT: .quad .Lsec_end1-some_other
 
 ; <common symbols> - it should have made one span for each symbol.
 ; CHECK-NEXT: .quad some_bss
 ; CHECK-NEXT: .quad 4
+
+; <text section> - it should have made one span covering all functions in this CU.
+; CHECK-NEXT: .quad .Lfunc_begin0
+; CHECK-NEXT: .quad .Lsec_end2-.Lfunc_begin0
 
 ; -- finish --
 ; CHECK-NEXT: # ARange terminator
@@ -48,12 +48,12 @@ target triple = "x86_64-unknown-linux-gnu"
 
 define void @some_code() !dbg !13 {
 entry:
-  %0 = load i32, i32* @some_data, align 4, !dbg !16
-  %1 = load i32, i32* @some_other, align 4, !dbg !16
+  %0 = load i32, ptr @some_data, align 4, !dbg !16
+  %1 = load i32, ptr @some_other, align 4, !dbg !16
   %add = add nsw i32 %0, %1, !dbg !16
-  %2 = load i32, i32* @some_bss, align 4, !dbg !16
+  %2 = load i32, ptr @some_bss, align 4, !dbg !16
   %add1 = add nsw i32 %2, %add, !dbg !16
-  store i32 %add1, i32* @some_bss, align 4, !dbg !16
+  store i32 %add1, ptr @some_bss, align 4, !dbg !16
   ret void, !dbg !17
 }
 

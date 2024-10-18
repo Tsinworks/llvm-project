@@ -62,13 +62,13 @@ Tester::Interestingness Tester::isInteresting(StringRef testCase) const {
   testerArgs.push_back(testCase);
 
   for (const std::string &arg : testScriptArgs)
-    testerArgs.push_back(arg);
+    testerArgs.emplace_back(arg);
 
   testerArgs.push_back(testCase);
 
   std::string errMsg;
   int result = llvm::sys::ExecuteAndWait(
-      testScript, testerArgs, /*Env=*/None, /*Redirects=*/None,
+      testScript, testerArgs, /*Env=*/std::nullopt, /*Redirects=*/std::nullopt,
       /*SecondsToWait=*/0, /*MemoryLimit=*/0, &errMsg);
 
   if (result < 0)

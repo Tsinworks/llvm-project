@@ -11,10 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "memprof_mibmap.h"
+#include "profile/MemProfData.inc"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_mutex.h"
 
 namespace __memprof {
+using ::llvm::memprof::MemInfoBlock;
 
 void InsertOrMerge(const uptr Id, const MemInfoBlock &Block, MIBMapTy &Map) {
   MIBMapTy::Handle h(&Map, static_cast<uptr>(Id), /*remove=*/false,
@@ -28,7 +30,18 @@ void InsertOrMerge(const uptr Id, const MemInfoBlock &Block, MIBMapTy &Map) {
   } else {
     LockedMemInfoBlock *lmib = *h;
     SpinMutexLock lock(&lmib->mutex);
+    uintptr_t ShorterHistogram;
+    if (Block.AccessHistogramSize > lmib->mib.AccessHistogramSize)
+      ShorterHistogram = lmib->mib.AccessHistogram;
+    else
+      ShorterHistogram = Block.AccessHistogram;
+
     lmib->mib.Merge(Block);
+    // The larger histogram is kept and the shorter histogram is discarded after
+    // adding the counters to the larger historam. Free only the shorter
+    // Histogram
+    if (Block.AccessHistogramSize > 0 || lmib->mib.AccessHistogramSize > 0)
+      InternalFree((void *)ShorterHistogram);
   }
 }
 

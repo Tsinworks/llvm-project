@@ -17,7 +17,9 @@
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "gtest/gtest.h"
@@ -30,9 +32,9 @@ std::unique_ptr<LLVMTargetMachine> createTargetMachine() {
   auto TT(Triple::normalize("x86_64--"));
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(TT, Error);
-  return std::unique_ptr<LLVMTargetMachine>(static_cast<LLVMTargetMachine*>(
-      TheTarget->createTargetMachine(TT, "", "", TargetOptions(), None, None,
-                                     CodeGenOpt::Default)));
+  return std::unique_ptr<LLVMTargetMachine>(static_cast<LLVMTargetMachine *>(
+      TheTarget->createTargetMachine(TT, "", "", TargetOptions(), std::nullopt,
+                                     std::nullopt, CodeGenOptLevel::Default)));
 }
 
 class MachineSizeOptsTest : public testing::Test {
@@ -76,7 +78,7 @@ class MachineSizeOptsTest : public testing::Test {
     M->setTargetTriple(TM->getTargetTriple().getTriple());
     M->setDataLayout(TM->createDataLayout());
     MMI = std::make_unique<MachineModuleInfo>(TM.get());
-    if (Parser->parseMachineFunctions(*M, *MMI.get()))
+    if (Parser->parseMachineFunctions(*M, *MMI))
       report_fatal_error("parseMachineFunctions failed");
   }
 
@@ -96,7 +98,7 @@ TEST_F(MachineSizeOptsTest, Test) {
   ASSERT_TRUE(G != nullptr);
   MachineFunction *H = getMachineFunction(M.get(), "h");
   ASSERT_TRUE(H != nullptr);
-  ProfileSummaryInfo PSI = ProfileSummaryInfo(*M.get());
+  ProfileSummaryInfo PSI = ProfileSummaryInfo(*M);
   ASSERT_TRUE(PSI.hasProfileSummary());
   BFIData BFID_F(*F);
   BFIData BFID_G(*G);

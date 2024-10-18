@@ -11,24 +11,67 @@
 
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/CachedHashString.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/Option/ArgList.h"
 #include "llvm/Support/CachePruning.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/Compiler.h"
+#include "llvm/Support/Compression.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/GlobPattern.h"
 #include "llvm/Support/PrettyStackTrace.h"
+#include "llvm/Support/TarWriter.h"
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <vector>
 
-namespace lld {
-namespace elf {
+namespace lld::elf {
 
 class InputFile;
+class BinaryFile;
+class BitcodeFile;
+class ELFFileBase;
+class SharedFile;
 class InputSectionBase;
+class EhInputSection;
+class Defined;
+class Symbol;
+class SymbolTable;
+class BitcodeCompiler;
+class OutputSection;
+class LinkerScript;
+class TargetInfo;
+struct Ctx;
+struct Partition;
+struct PhdrEntry;
+
+class BssSection;
+class GdbIndexSection;
+class GotPltSection;
+class GotSection;
+class IBTPltSection;
+class IgotPltSection;
+class InputSection;
+class IpltSection;
+class MipsGotSection;
+class MipsRldMapSection;
+class PPC32Got2Section;
+class PPC64LongBranchTargetSection;
+class PltSection;
+class RelocationBaseSection;
+class RelroPaddingSection;
+class StringTableSection;
+class SymbolTableBaseSection;
+class SymtabShndxSection;
+class SyntheticSection;
 
 enum ELFKind : uint8_t {
   ELFNoneKind,
@@ -39,11 +82,14 @@ enum ELFKind : uint8_t {
 };
 
 // For -Bno-symbolic, -Bsymbolic-non-weak-functions, -Bsymbolic-functions,
-// -Bsymbolic.
-enum class BsymbolicKind { None, NonWeakFunctions, Functions, All };
+// -Bsymbolic-non-weak, -Bsymbolic.
+enum class BsymbolicKind { None, NonWeakFunctions, Functions, NonWeak, All };
 
 // For --build-id.
 enum class BuildIdKind { None, Fast, Md5, Sha1, Hexstring, Uuid };
+
+// For --call-graph-profile-sort={none,hfsort,cdsort}.
+enum class CGProfileSortKind { None, Hfsort, Cdsort };
 
 // For --discard-{all,locals,none}.
 enum class DiscardPolicy { Default, All, Locals, None };
@@ -61,7 +107,14 @@ enum class UnresolvedPolicy { ReportError, Warn, Ignore };
 enum class OrphanHandlingPolicy { Place, Warn, Error };
 
 // For --sort-section and linkerscript sorting rules.
-enum class SortSectionPolicy { Default, None, Alignment, Name, Priority };
+enum class SortSectionPolicy {
+  Default,
+  None,
+  Alignment,
+  Name,
+  Priority,
+  Reverse,
+};
 
 // For --target2
 enum class Target2Policy { Abs, Rel, GotRel };
@@ -75,6 +128,12 @@ enum class SeparateSegmentKind { None, Code, Loadable };
 // For -z *stack
 enum class GnuStackKind { None, Exec, NoExec };
 
+// For --lto=
+enum LtoKind : uint8_t {UnifiedThin, UnifiedRegular, Default};
+
+// For -z gcs=
+enum class GcsPolicy { Implicit, Never, Always };
+
 struct SymbolVersion {
   llvm::StringRef name;
   bool isExternCpp;
@@ -86,15 +145,48 @@ struct SymbolVersion {
 struct VersionDefinition {
   llvm::StringRef name;
   uint16_t id;
-  std::vector<SymbolVersion> nonLocalPatterns;
-  std::vector<SymbolVersion> localPatterns;
+  SmallVector<SymbolVersion, 0> nonLocalPatterns;
+  SmallVector<SymbolVersion, 0> localPatterns;
+};
+
+class LinkerDriver {
+public:
+  LinkerDriver(Ctx &ctx);
+  LinkerDriver(LinkerDriver &) = delete;
+  void linkerMain(ArrayRef<const char *> args);
+  void addFile(StringRef path, bool withLOption);
+  void addLibrary(StringRef name);
+
+private:
+  Ctx &ctx;
+  void createFiles(llvm::opt::InputArgList &args);
+  void inferMachineType();
+  template <class ELFT> void link(llvm::opt::InputArgList &args);
+  template <class ELFT> void compileBitcodeFiles(bool skipLinkedOutput);
+  bool tryAddFatLTOFile(MemoryBufferRef mb, StringRef archiveName,
+                        uint64_t offsetInArchive, bool lazy);
+  // True if we are in --whole-archive and --no-whole-archive.
+  bool inWholeArchive = false;
+
+  // True if we are in --start-lib and --end-lib.
+  bool inLib = false;
+
+  std::unique_ptr<BitcodeCompiler> lto;
+  std::vector<InputFile *> files;
+
+public:
+  // See InputFile::groupId.
+  uint32_t nextGroupId;
+  bool isInGroup;
+  InputFile *armCmseImpLib = nullptr;
+  SmallVector<std::pair<StringRef, unsigned>, 0> archiveFiles;
 };
 
 // This struct contains the global configuration for the linker.
 // Most fields are direct mapping from the command line options
 // and such fields have the same name as the corresponding options.
-// Most fields are initialized by the driver.
-struct Configuration {
+// Most fields are initialized by the ctx.driver.
+struct Config {
   uint8_t osabi = 0;
   uint32_t andFeatures = 0;
   llvm::CachePruningPolicy thinLTOCachePolicy;
@@ -117,9 +209,10 @@ struct Configuration {
   llvm::StringRef mapFile;
   llvm::StringRef outputFile;
   llvm::StringRef optRemarksFilename;
-  llvm::Optional<uint64_t> optRemarksHotnessThreshold = 0;
+  std::optional<uint64_t> optRemarksHotnessThreshold = 0;
   llvm::StringRef optRemarksPasses;
   llvm::StringRef optRemarksFormat;
+  llvm::StringRef optStatsFilename;
   llvm::StringRef progName;
   llvm::StringRef printArchiveStats;
   llvm::StringRef printSymbolOrder;
@@ -128,38 +221,57 @@ struct Configuration {
   llvm::StringRef thinLTOCacheDir;
   llvm::StringRef thinLTOIndexOnlyArg;
   llvm::StringRef whyExtract;
+  llvm::StringRef cmseInputLib;
+  llvm::StringRef cmseOutputLib;
   StringRef zBtiReport = "none";
   StringRef zCetReport = "none";
+  StringRef zPauthReport = "none";
+  StringRef zGcsReport = "none";
+  bool ltoBBAddrMap;
   llvm::StringRef ltoBasicBlockSections;
   std::pair<llvm::StringRef, llvm::StringRef> thinLTOObjectSuffixReplace;
-  std::pair<llvm::StringRef, llvm::StringRef> thinLTOPrefixReplace;
+  llvm::StringRef thinLTOPrefixReplaceOld;
+  llvm::StringRef thinLTOPrefixReplaceNew;
+  llvm::StringRef thinLTOPrefixReplaceNativeObject;
   std::string rpath;
-  std::vector<VersionDefinition> versionDefinitions;
-  std::vector<llvm::StringRef> auxiliaryList;
-  std::vector<llvm::StringRef> filterList;
-  std::vector<llvm::StringRef> searchPaths;
-  std::vector<llvm::StringRef> symbolOrderingFile;
-  std::vector<llvm::StringRef> thinLTOModulesToCompile;
-  std::vector<llvm::StringRef> undefined;
-  std::vector<SymbolVersion> dynamicList;
-  std::vector<uint8_t> buildIdVector;
+  llvm::SmallVector<VersionDefinition, 0> versionDefinitions;
+  llvm::SmallVector<llvm::StringRef, 0> auxiliaryList;
+  llvm::SmallVector<llvm::StringRef, 0> filterList;
+  llvm::SmallVector<llvm::StringRef, 0> passPlugins;
+  llvm::SmallVector<llvm::StringRef, 0> searchPaths;
+  llvm::SmallVector<llvm::StringRef, 0> symbolOrderingFile;
+  llvm::SmallVector<llvm::StringRef, 0> thinLTOModulesToCompile;
+  llvm::SmallVector<llvm::StringRef, 0> undefined;
+  llvm::SmallVector<SymbolVersion, 0> dynamicList;
+  llvm::SmallVector<uint8_t, 0> buildIdVector;
+  llvm::SmallVector<llvm::StringRef, 0> mllvmOpts;
   llvm::MapVector<std::pair<const InputSectionBase *, const InputSectionBase *>,
                   uint64_t>
       callGraphProfile;
+  bool cmseImplib = false;
   bool allowMultipleDefinition;
-  bool androidPackDynRelocs;
+  bool fatLTOObjects;
+  bool androidPackDynRelocs = false;
+  bool armHasArmISA = false;
+  bool armHasThumb2ISA = false;
   bool armHasBlx = false;
   bool armHasMovtMovw = false;
   bool armJ1J2BranchEncoding = false;
+  bool armCMSESupport = false;
   bool asNeeded = false;
+  bool armBe8 = false;
   BsymbolicKind bsymbolic = BsymbolicKind::None;
-  bool callGraphProfileSort;
+  CGProfileSortKind callGraphProfileSort;
   bool checkSections;
   bool checkDynamicRelocs;
-  bool compressDebugSections;
+  std::optional<llvm::DebugCompressionType> compressDebugSections;
+  llvm::SmallVector<
+      std::tuple<llvm::GlobPattern, llvm::DebugCompressionType, unsigned>, 0>
+      compressSections;
   bool cref;
-  std::vector<std::pair<llvm::GlobPattern, uint64_t>> deadRelocInNonAlloc;
-  bool defineCommon;
+  llvm::SmallVector<std::pair<llvm::GlobPattern, uint64_t>, 0>
+      deadRelocInNonAlloc;
+  bool debugNames;
   bool demangle = true;
   bool dependentLibraries;
   bool disableVerify;
@@ -167,6 +279,7 @@ struct Configuration {
   bool emitLLVM;
   bool emitRelocs;
   bool enableNewDtags;
+  bool enableNonContiguousRegions;
   bool executeOnly;
   bool exportDynamic;
   bool fixCortexA53Errata843419;
@@ -184,8 +297,8 @@ struct Configuration {
   bool ltoPGOWarnMismatch;
   bool ltoDebugPassManager;
   bool ltoEmitAsm;
-  bool ltoNewPassManager;
   bool ltoUniqueBasicBlockSectionNames;
+  bool ltoValidateAllVtablesHaveTypeInfos;
   bool ltoWholeProgramVisibility;
   bool mergeArmExidx;
   bool mipsN32Abi = false;
@@ -204,11 +317,16 @@ struct Configuration {
   bool pie;
   bool printGcSections;
   bool printIcfSections;
+  bool printMemoryUsage;
+  bool rejectMismatch;
   bool relax;
+  bool relaxGP;
   bool relocatable;
-  bool relrPackDynRelocs;
-  bool saveTemps;
-  std::vector<std::pair<llvm::GlobPattern, uint32_t>> shuffleSections;
+  bool resolveGroups;
+  bool relrGlibc = false;
+  bool relrPackDynRelocs = false;
+  llvm::DenseSet<llvm::StringRef> saveTempsArgs;
+  llvm::SmallVector<std::pair<llvm::GlobPattern, uint32_t>, 0> shuffleSections;
   bool singleRoRx;
   bool shared;
   bool symbolic;
@@ -217,6 +335,7 @@ struct Configuration {
   bool target1Rel;
   bool trace;
   bool thinLTOEmitImportsFiles;
+  bool thinLTOEmitIndexFiles;
   bool thinLTOIndexOnly;
   bool timeTraceEnabled;
   bool tocOptimize;
@@ -225,7 +344,7 @@ struct Configuration {
   bool unique;
   bool useAndroidRelrTags = false;
   bool warnBackrefs;
-  std::vector<llvm::GlobPattern> warnBackrefsExclude;
+  llvm::SmallVector<llvm::GlobPattern, 0> warnBackrefsExclude;
   bool warnCommon;
   bool warnMissingEntry;
   bool warnSymbolOrdering;
@@ -240,6 +359,7 @@ struct Configuration {
   bool zInitfirst;
   bool zInterpose;
   bool zKeepTextSectionPrefix;
+  bool zLrodataAfterBss;
   bool zNodefaultlib;
   bool zNodelete;
   bool zNodlopen;
@@ -248,6 +368,7 @@ struct Configuration {
   bool zPacPlt;
   bool zRelro;
   bool zRodynamic;
+  bool zSectionHeader;
   bool zShstk;
   bool zStartStopGC;
   uint8_t zStartStopVisibility;
@@ -263,23 +384,26 @@ struct Configuration {
   UnresolvedPolicy unresolvedSymbols;
   UnresolvedPolicy unresolvedSymbolsInShlib;
   Target2Policy target2;
+  GcsPolicy zGcs;
   bool power10Stubs;
   ARMVFPArgKind armVFPArgs = ARMVFPArgKind::Default;
   BuildIdKind buildId = BuildIdKind::None;
   SeparateSegmentKind zSeparate;
   ELFKind ekind = ELFNoneKind;
   uint16_t emachine = llvm::ELF::EM_NONE;
-  llvm::Optional<uint64_t> imageBase;
+  std::optional<uint64_t> imageBase;
   uint64_t commonPageSize;
   uint64_t maxPageSize;
   uint64_t mipsGotSize;
   uint64_t zStackSize;
   unsigned ltoPartitions;
   unsigned ltoo;
+  llvm::CodeGenOptLevel ltoCgo;
   unsigned optimize;
   StringRef thinLTOJobs;
   unsigned timeTraceGranularity;
   int32_t splitStackAdjustSize;
+  StringRef packageMetadata;
 
   // The following config options do not directly correspond to any
   // particular command line options.
@@ -295,7 +419,7 @@ struct Configuration {
   bool isLE;
 
   // endianness::little if isLE is true. endianness::big otherwise.
-  llvm::support::endianness endianness;
+  llvm::endianness endianness;
 
   // True if the target is the little-endian MIPS64.
   //
@@ -340,30 +464,221 @@ struct Configuration {
 
   // 4 for ELF32, 8 for ELF64.
   int wordsize;
+
+  // Mode of MTE to write to the ELF note. Should be one of NT_MEMTAG_ASYNC (for
+  // async), NT_MEMTAG_SYNC (for sync), or NT_MEMTAG_LEVEL_NONE (for none). If
+  // async or sync is enabled, write the ELF note specifying the default MTE
+  // mode.
+  int androidMemtagMode;
+  // Signal to the dynamic loader to enable heap MTE.
+  bool androidMemtagHeap;
+  // Signal to the dynamic loader that this binary expects stack MTE. Generally,
+  // this means to map the primary and thread stacks as PROT_MTE. Note: This is
+  // not supported on Android 11 & 12.
+  bool androidMemtagStack;
+
+  // When using a unified pre-link LTO pipeline, specify the backend LTO mode.
+  LtoKind ltoKind = LtoKind::Default;
+
+  unsigned threadCount;
+
+  // If an input file equals a key, remap it to the value.
+  llvm::DenseMap<llvm::StringRef, llvm::StringRef> remapInputs;
+  // If an input file matches a wildcard pattern, remap it to the value.
+  llvm::SmallVector<std::pair<llvm::GlobPattern, llvm::StringRef>, 0>
+      remapInputsWildcards;
 };
 
-// The only instance of Configuration struct.
-extern Configuration *config;
+// Some index properties of a symbol are stored separately in this auxiliary
+// struct to decrease sizeof(SymbolUnion) in the majority of cases.
+struct SymbolAux {
+  uint32_t gotIdx = -1;
+  uint32_t pltIdx = -1;
+  uint32_t tlsDescIdx = -1;
+  uint32_t tlsGdIdx = -1;
+};
+
+struct DuplicateSymbol {
+  const Symbol *sym;
+  const InputFile *file;
+  InputSectionBase *section;
+  uint64_t value;
+};
+
+// Linker generated sections which can be used as inputs and are not specific to
+// a partition.
+struct InStruct {
+  std::unique_ptr<InputSection> attributes;
+  std::unique_ptr<SyntheticSection> riscvAttributes;
+  std::unique_ptr<BssSection> bss;
+  std::unique_ptr<BssSection> bssRelRo;
+  std::unique_ptr<GotSection> got;
+  std::unique_ptr<GotPltSection> gotPlt;
+  std::unique_ptr<IgotPltSection> igotPlt;
+  std::unique_ptr<RelroPaddingSection> relroPadding;
+  std::unique_ptr<SyntheticSection> armCmseSGSection;
+  std::unique_ptr<PPC64LongBranchTargetSection> ppc64LongBranchTarget;
+  std::unique_ptr<SyntheticSection> mipsAbiFlags;
+  std::unique_ptr<MipsGotSection> mipsGot;
+  std::unique_ptr<SyntheticSection> mipsOptions;
+  std::unique_ptr<SyntheticSection> mipsReginfo;
+  std::unique_ptr<MipsRldMapSection> mipsRldMap;
+  std::unique_ptr<SyntheticSection> partEnd;
+  std::unique_ptr<SyntheticSection> partIndex;
+  std::unique_ptr<PltSection> plt;
+  std::unique_ptr<IpltSection> iplt;
+  std::unique_ptr<PPC32Got2Section> ppc32Got2;
+  std::unique_ptr<IBTPltSection> ibtPlt;
+  std::unique_ptr<RelocationBaseSection> relaPlt;
+  // Non-SHF_ALLOC sections
+  std::unique_ptr<SyntheticSection> debugNames;
+  std::unique_ptr<GdbIndexSection> gdbIndex;
+  std::unique_ptr<StringTableSection> shStrTab;
+  std::unique_ptr<StringTableSection> strTab;
+  std::unique_ptr<SymbolTableBaseSection> symTab;
+  std::unique_ptr<SymtabShndxSection> symTabShndx;
+
+  void reset();
+};
+
+struct Ctx {
+  Config arg;
+  LinkerDriver driver;
+  LinkerScript *script;
+  std::unique_ptr<TargetInfo> target;
+
+  // These variables are initialized by Writer and should not be used before
+  // Writer is initialized.
+  uint8_t *bufferStart;
+  Partition *mainPart;
+  PhdrEntry *tlsPhdr;
+  struct OutSections {
+    OutputSection *elfHeader;
+    OutputSection *programHeaders;
+    OutputSection *preinitArray;
+    OutputSection *initArray;
+    OutputSection *finiArray;
+  };
+  OutSections out;
+  SmallVector<OutputSection *, 0> outputSections;
+  std::vector<Partition> partitions;
+
+  InStruct in;
+
+  // Some linker-generated symbols need to be created as
+  // Defined symbols.
+  struct ElfSym {
+    // __bss_start
+    Defined *bss;
+
+    // etext and _etext
+    Defined *etext1;
+    Defined *etext2;
+
+    // edata and _edata
+    Defined *edata1;
+    Defined *edata2;
+
+    // end and _end
+    Defined *end1;
+    Defined *end2;
+
+    // The _GLOBAL_OFFSET_TABLE_ symbol is defined by target convention to
+    // be at some offset from the base of the .got section, usually 0 or
+    // the end of the .got.
+    Defined *globalOffsetTable;
+
+    // _gp, _gp_disp and __gnu_local_gp symbols. Only for MIPS.
+    Defined *mipsGp;
+    Defined *mipsGpDisp;
+    Defined *mipsLocalGp;
+
+    // __global_pointer$ for RISC-V.
+    Defined *riscvGlobalPointer;
+
+    // __rel{,a}_iplt_{start,end} symbols.
+    Defined *relaIpltStart;
+    Defined *relaIpltEnd;
+
+    // _TLS_MODULE_BASE_ on targets that support TLSDESC.
+    Defined *tlsModuleBase;
+  };
+  ElfSym sym;
+  std::unique_ptr<SymbolTable> symtab;
+
+  SmallVector<std::unique_ptr<MemoryBuffer>> memoryBuffers;
+  SmallVector<ELFFileBase *, 0> objectFiles;
+  SmallVector<SharedFile *, 0> sharedFiles;
+  SmallVector<BinaryFile *, 0> binaryFiles;
+  SmallVector<BitcodeFile *, 0> bitcodeFiles;
+  SmallVector<BitcodeFile *, 0> lazyBitcodeFiles;
+  SmallVector<InputSectionBase *, 0> inputSections;
+  SmallVector<EhInputSection *, 0> ehInputSections;
+
+  SmallVector<SymbolAux, 0> symAux;
+  // Duplicate symbol candidates.
+  SmallVector<DuplicateSymbol, 0> duplicates;
+  // Symbols in a non-prevailing COMDAT group which should be changed to an
+  // Undefined.
+  SmallVector<std::pair<Symbol *, unsigned>, 0> nonPrevailingSyms;
+  // A tuple of (reference, extractedFile, sym). Used by --why-extract=.
+  SmallVector<std::tuple<std::string, const InputFile *, const Symbol &>, 0>
+      whyExtractRecords;
+  // A mapping from a symbol to an InputFile referencing it backward. Used by
+  // --warn-backrefs.
+  llvm::DenseMap<const Symbol *,
+                 std::pair<const InputFile *, const InputFile *>>
+      backwardReferences;
+  llvm::SmallSet<llvm::StringRef, 0> auxiliaryFiles;
+  // If --reproduce is specified, all input files are written to this tar
+  // archive.
+  std::unique_ptr<llvm::TarWriter> tar;
+  // InputFile for linker created symbols with no source location.
+  InputFile *internalFile;
+  // True if SHT_LLVM_SYMPART is used.
+  std::atomic<bool> hasSympart{false};
+  // True if there are TLS IE relocations. Set DF_STATIC_TLS if -shared.
+  std::atomic<bool> hasTlsIe{false};
+  // True if we need to reserve two .got entries for local-dynamic TLS model.
+  std::atomic<bool> needsTlsLd{false};
+  // True if all native vtable symbols have corresponding type info symbols
+  // during LTO.
+  bool ltoAllVtablesHaveTypeInfos;
+
+  // Each symbol assignment and DEFINED(sym) reference is assigned an increasing
+  // order. Each DEFINED(sym) evaluation checks whether the reference happens
+  // before a possible `sym = expr;`.
+  unsigned scriptSymOrderCounter = 1;
+  llvm::DenseMap<const Symbol *, unsigned> scriptSymOrder;
+
+  // The set of TOC entries (.toc + addend) for which we should not apply
+  // toc-indirect to toc-relative relaxation. const Symbol * refers to the
+  // STT_SECTION symbol associated to the .toc input section.
+  llvm::DenseSet<std::pair<const Symbol *, uint64_t>> ppc64noTocRelax;
+
+  Ctx();
+  void reset();
+
+  llvm::raw_fd_ostream openAuxiliaryFile(llvm::StringRef, std::error_code &);
+
+  ArrayRef<uint8_t> aarch64PauthAbiCoreInfo;
+};
+
+LLVM_LIBRARY_VISIBILITY extern Ctx ctx;
 
 // The first two elements of versionDefinitions represent VER_NDX_LOCAL and
 // VER_NDX_GLOBAL. This helper returns other elements.
-static inline ArrayRef<VersionDefinition> namedVersionDefs() {
-  return llvm::makeArrayRef(config->versionDefinitions).slice(2);
+static inline ArrayRef<VersionDefinition> namedVersionDefs(Ctx &ctx) {
+  return llvm::ArrayRef(ctx.arg.versionDefinitions).slice(2);
 }
 
-static inline void errorOrWarn(const Twine &msg) {
-  if (!config->noinhibitExec)
-    error(msg);
-  else
-    warn(msg);
-}
+void errorOrWarn(const Twine &msg);
 
 static inline void internalLinkerError(StringRef loc, const Twine &msg) {
   errorOrWarn(loc + "internal linker error: " + msg + "\n" +
               llvm::getBugReportMsg());
 }
 
-} // namespace elf
-} // namespace lld
+} // namespace lld::elf
 
 #endif

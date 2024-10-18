@@ -7,12 +7,23 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Transforms/ViewOpGraph.h"
-#include "PassDetail.h"
+
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/IR/Block.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Support/IndentedOstream.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/GraphWriter.h"
+#include <map>
+#include <optional>
+#include <utility>
+
+namespace mlir {
+#define GEN_PASS_DEF_VIEWOPGRAPH
+#include "mlir/Transforms/Passes.h.inc"
+} // namespace mlir
 
 using namespace mlir;
 
@@ -24,7 +35,8 @@ static const StringRef kShapeNone = "plain";
 /// Return the size limits for eliding large attributes.
 static int64_t getLargeAttributeSizeLimit() {
   // Use the default from the printer flags if possible.
-  if (Optional<int64_t> limit = OpPrintingFlags().getLargeElementsAttrLimit())
+  if (std::optional<int64_t> limit =
+          OpPrintingFlags().getLargeElementsAttrLimit())
     return *limit;
   return 16;
 }
@@ -34,7 +46,7 @@ static std::string strFromOs(function_ref<void(raw_ostream &)> func) {
   std::string buf;
   llvm::raw_string_ostream os(buf);
   func(os);
-  return os.str();
+  return buf;
 }
 
 /// Escape special characters such as '\n' and quotation marks.
@@ -43,9 +55,11 @@ static std::string escapeString(std::string str) {
 }
 
 /// Put quotation marks around a given string.
-static std::string quoteString(std::string str) { return "\"" + str + "\""; }
+static std::string quoteString(const std::string &str) {
+  return "\"" + str + "\"";
+}
 
-using AttributeMap = llvm::StringMap<std::string>;
+using AttributeMap = std::map<std::string, std::string>;
 
 namespace {
 
@@ -58,39 +72,68 @@ namespace {
 /// cluster, an invisible "anchor" node is created.
 struct Node {
 public:
-  Node(int id = 0, Optional<int> clusterId = llvm::None)
+  Node(int id = 0, std::optional<int> clusterId = std::nullopt)
       : id(id), clusterId(clusterId) {}
 
   int id;
-  Optional<int> clusterId;
+  std::optional<int> clusterId;
 };
 
 /// This pass generates a Graphviz dataflow visualization of an MLIR operation.
 /// Note: See https://www.graphviz.org/doc/info/lang.html for more information
 /// about the Graphviz DOT language.
-class PrintOpPass : public ViewOpGraphBase<PrintOpPass> {
+class PrintOpPass : public impl::ViewOpGraphBase<PrintOpPass> {
 public:
   PrintOpPass(raw_ostream &os) : os(os) {}
   PrintOpPass(const PrintOpPass &o) : PrintOpPass(o.os.getOStream()) {}
 
   void runOnOperation() override {
+    initColorMapping(*getOperation());
     emitGraph([&]() {
       processOperation(getOperation());
       emitAllEdgeStmts();
     });
+    markAllAnalysesPreserved();
   }
 
   /// Create a CFG graph for a region. Used in `Region::viewGraph`.
   void emitRegionCFG(Region &region) {
     printControlFlowEdges = true;
     printDataFlowEdges = false;
+    initColorMapping(region);
     emitGraph([&]() { processRegion(region); });
   }
 
 private:
+  /// Generate a color mapping that will color every operation with the same
+  /// name the same way. It'll interpolate the hue in the HSV color-space,
+  /// attempting to keep the contrast suitable for black text.
+  template <typename T>
+  void initColorMapping(T &irEntity) {
+    backgroundColors.clear();
+    SmallVector<Operation *> ops;
+    irEntity.walk([&](Operation *op) {
+      auto &entry = backgroundColors[op->getName()];
+      if (entry.first == 0)
+        ops.push_back(op);
+      ++entry.first;
+    });
+    for (auto indexedOps : llvm::enumerate(ops)) {
+      double hue = ((double)indexedOps.index()) / ops.size();
+      backgroundColors[indexedOps.value()->getName()].second =
+          std::to_string(hue) + " 1.0 1.0";
+    }
+  }
+
   /// Emit all edges. This function should be called after all nodes have been
   /// emitted.
   void emitAllEdgeStmts() {
+    if (printDataFlowEdges) {
+      for (const auto &[value, node, label] : dataFlowEdges) {
+        emitEdgeStmt(valueToNode[value], node, label, kLineStyleDataFlow);
+      }
+    }
+
     for (const std::string &edge : edges)
       os << edge << ";\n";
     edges.clear();
@@ -104,7 +147,8 @@ private:
     os.indent();
     // Emit invisible anchor node from/to which arrows can be drawn.
     Node anchorNode = emitNodeStmt(" ", kShapeNone);
-    os << attrStmt("label", quoteString(escapeString(label))) << ";\n";
+    os << attrStmt("label", quoteString(escapeString(std::move(label))))
+       << ";\n";
     builder();
     os.unindent();
     os << "}\n";
@@ -120,7 +164,7 @@ private:
   void emitAttrList(raw_ostream &os, const AttributeMap &map) {
     os << "[";
     interleaveComma(map, os, [&](const auto &it) {
-      os << this->attrStmt(it.getKey(), it.getValue());
+      os << this->attrStmt(it.first, it.second);
     });
     os << "]";
   }
@@ -131,21 +175,21 @@ private:
     int64_t largeAttrLimit = getLargeAttributeSizeLimit();
 
     // Always emit splat attributes.
-    if (attr.isa<SplatElementsAttr>()) {
+    if (isa<SplatElementsAttr>(attr)) {
       attr.print(os);
       return;
     }
 
     // Elide "big" elements attributes.
-    auto elements = attr.dyn_cast<ElementsAttr>();
+    auto elements = dyn_cast<ElementsAttr>(attr);
     if (elements && elements.getNumElements() > largeAttrLimit) {
-      os << std::string(elements.getType().getRank(), '[') << "..."
-         << std::string(elements.getType().getRank(), ']') << " : "
+      os << std::string(elements.getShapedType().getRank(), '[') << "..."
+         << std::string(elements.getShapedType().getRank(), ']') << " : "
          << elements.getType();
       return;
     }
 
-    auto array = attr.dyn_cast<ArrayAttr>();
+    auto array = dyn_cast<ArrayAttr>(attr);
     if (array && static_cast<int64_t>(array.size()) > largeAttrLimit) {
       os << "[...]";
       return;
@@ -155,7 +199,7 @@ private:
     std::string buf;
     llvm::raw_string_ostream ss(buf);
     attr.print(ss);
-    os << truncateString(ss.str());
+    os << truncateString(buf);
   }
 
   /// Append an edge to the list of edges.
@@ -167,7 +211,7 @@ private:
     // clipped at the boundary, but labels are not. This can lead to labels
     // floating around without any edge next to them.
     if (!n1.clusterId && !n2.clusterId)
-      attrs["label"] = quoteString(escapeString(label));
+      attrs["label"] = quoteString(escapeString(std::move(label)));
     // Use `ltail` and `lhead` to draw edges between clusters.
     if (n1.clusterId)
       attrs["ltail"] = "cluster_" + std::to_string(*n1.clusterId);
@@ -192,11 +236,16 @@ private:
   }
 
   /// Emit a node statement.
-  Node emitNodeStmt(std::string label, StringRef shape = kShapeNode) {
+  Node emitNodeStmt(std::string label, StringRef shape = kShapeNode,
+                    StringRef background = "") {
     int nodeId = ++counter;
     AttributeMap attrs;
-    attrs["label"] = quoteString(escapeString(label));
+    attrs["label"] = quoteString(escapeString(std::move(label)));
     attrs["shape"] = shape.str();
+    if (!background.empty()) {
+      attrs["style"] = "filled";
+      attrs["fillcolor"] = ("\"" + background + "\"").str();
+    }
     os << llvm::format("v%i ", nodeId);
     emitAttrList(os, attrs);
     os << ";\n";
@@ -213,8 +262,7 @@ private:
         std::string buf;
         llvm::raw_string_ostream ss(buf);
         interleaveComma(op->getResultTypes(), ss);
-        os << truncateString(ss.str()) << ")";
-        os << ")";
+        os << truncateString(buf) << ")";
       }
 
       // Print attributes.
@@ -241,7 +289,7 @@ private:
         valueToNode[blockArg] = emitNodeStmt(getLabel(blockArg));
 
       // Emit a node for each operation.
-      Optional<Node> prevNode;
+      std::optional<Node> prevNode;
       for (Operation &op : block) {
         Node nextNode = processOperation(&op);
         if (printControlFlowEdges && prevNode)
@@ -265,16 +313,16 @@ private:
           },
           getLabel(op));
     } else {
-      node = emitNodeStmt(getLabel(op));
+      node = emitNodeStmt(getLabel(op), kShapeNode,
+                          backgroundColors[op->getName()].second);
     }
 
     // Insert data flow edges originating from each operand.
     if (printDataFlowEdges) {
       unsigned numOperands = op->getNumOperands();
       for (unsigned i = 0; i < numOperands; i++)
-        emitEdgeStmt(valueToNode[op->getOperand(i)], node,
-                     /*label=*/numOperands == 1 ? "" : std::to_string(i),
-                     kLineStyleDataFlow);
+        dataFlowEdges.push_back({op->getOperand(i), node,
+                                 numOperands == 1 ? "" : std::to_string(i)});
     }
 
     for (Value result : op->getResults())
@@ -303,14 +351,17 @@ private:
   std::vector<std::string> edges;
   /// Mapping of SSA values to Graphviz nodes/clusters.
   DenseMap<Value, Node> valueToNode;
+  /// Output for data flow edges is delayed until the end to handle cycles
+  std::vector<std::tuple<Value, Node, std::string>> dataFlowEdges;
   /// Counter for generating unique node/subgraph identifiers.
   int counter = 0;
+
+  DenseMap<OperationName, std::pair<int, std::string>> backgroundColors;
 };
 
 } // namespace
 
-std::unique_ptr<Pass>
-mlir::createPrintOpGraphPass(raw_ostream &os) {
+std::unique_ptr<Pass> mlir::createPrintOpGraphPass(raw_ostream &os) {
   return std::make_unique<PrintOpPass>(os);
 }
 

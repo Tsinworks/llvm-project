@@ -16,36 +16,35 @@
 #define LLVM_IR_INSTRTYPES_H
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/None.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
-#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/FMF.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/OperandTraits.h"
-#include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
-#include "llvm/IR/Value.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace llvm {
+
+class StringRef;
+class Type;
+class Value;
+class ConstantRange;
 
 namespace Intrinsic {
 typedef unsigned ID;
@@ -56,20 +55,18 @@ typedef unsigned ID;
 //===----------------------------------------------------------------------===//
 
 class UnaryInstruction : public Instruction {
+  constexpr static IntrusiveOperandsAllocMarker AllocMarker{1};
+
 protected:
   UnaryInstruction(Type *Ty, unsigned iType, Value *V,
-                   Instruction *IB = nullptr)
-    : Instruction(Ty, iType, &Op<0>(), 1, IB) {
-    Op<0>() = V;
-  }
-  UnaryInstruction(Type *Ty, unsigned iType, Value *V, BasicBlock *IAE)
-    : Instruction(Ty, iType, &Op<0>(), 1, IAE) {
+                   InsertPosition InsertBefore = nullptr)
+      : Instruction(Ty, iType, AllocMarker, InsertBefore) {
     Op<0>() = V;
   }
 
 public:
   // allocate space for exactly one operand
-  void *operator new(size_t S) { return User::operator new(S, 1); }
+  void *operator new(size_t S) { return User::operator new(S, AllocMarker); }
   void operator delete(void *Ptr) { User::operator delete(Ptr); }
 
   /// Transparently provide more efficient getOperand methods.
@@ -77,11 +74,11 @@ public:
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const Instruction *I) {
-    return I->isUnaryOp() ||
-           I->getOpcode() == Instruction::Alloca ||
+    return I->isUnaryOp() || I->getOpcode() == Instruction::Alloca ||
            I->getOpcode() == Instruction::Load ||
            I->getOpcode() == Instruction::VAArg ||
            I->getOpcode() == Instruction::ExtractValue ||
+           I->getOpcode() == Instruction::Freeze ||
            (I->getOpcode() >= CastOpsBegin && I->getOpcode() < CastOpsEnd);
   }
   static bool classof(const Value *V) {
@@ -104,10 +101,8 @@ class UnaryOperator : public UnaryInstruction {
   void AssertOK();
 
 protected:
-  UnaryOperator(UnaryOps iType, Value *S, Type *Ty,
-                const Twine &Name, Instruction *InsertBefore);
-  UnaryOperator(UnaryOps iType, Value *S, Type *Ty,
-                const Twine &Name, BasicBlock *InsertAtEnd);
+  UnaryOperator(UnaryOps iType, Value *S, Type *Ty, const Twine &Name,
+                InsertPosition InsertBefore);
 
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -115,7 +110,6 @@ protected:
   UnaryOperator *cloneImpl() const;
 
 public:
-
   /// Construct a unary instruction, given the opcode and an operand.
   /// Optionally (if InstBefore is specified) insert the instruction
   /// into a BasicBlock right before the specified instruction.  The specified
@@ -123,41 +117,27 @@ public:
   ///
   static UnaryOperator *Create(UnaryOps Op, Value *S,
                                const Twine &Name = Twine(),
-                               Instruction *InsertBefore = nullptr);
-
-  /// Construct a unary instruction, given the opcode and an operand.
-  /// Also automatically insert this instruction to the end of the
-  /// BasicBlock specified.
-  ///
-  static UnaryOperator *Create(UnaryOps Op, Value *S,
-                               const Twine &Name,
-                               BasicBlock *InsertAtEnd);
+                               InsertPosition InsertBefore = nullptr);
 
   /// These methods just forward to Create, and are useful when you
   /// statically know what type of instruction you're going to create.  These
   /// helpers just save some typing.
-#define HANDLE_UNARY_INST(N, OPC, CLASS) \
-  static UnaryOperator *Create##OPC(Value *V, const Twine &Name = "") {\
-    return Create(Instruction::OPC, V, Name);\
+#define HANDLE_UNARY_INST(N, OPC, CLASS)                                       \
+  static UnaryOperator *Create##OPC(Value *V, const Twine &Name = "") {        \
+    return Create(Instruction::OPC, V, Name);                                  \
   }
 #include "llvm/IR/Instruction.def"
-#define HANDLE_UNARY_INST(N, OPC, CLASS) \
-  static UnaryOperator *Create##OPC(Value *V, const Twine &Name, \
-                                    BasicBlock *BB) {\
-    return Create(Instruction::OPC, V, Name, BB);\
-  }
-#include "llvm/IR/Instruction.def"
-#define HANDLE_UNARY_INST(N, OPC, CLASS) \
-  static UnaryOperator *Create##OPC(Value *V, const Twine &Name, \
-                                    Instruction *I) {\
-    return Create(Instruction::OPC, V, Name, I);\
+#define HANDLE_UNARY_INST(N, OPC, CLASS)                                       \
+  static UnaryOperator *Create##OPC(Value *V, const Twine &Name,               \
+                                    InsertPosition InsertBefore = nullptr) {   \
+    return Create(Instruction::OPC, V, Name, InsertBefore);                    \
   }
 #include "llvm/IR/Instruction.def"
 
   static UnaryOperator *
   CreateWithCopiedFlags(UnaryOps Opc, Value *V, Instruction *CopyO,
                         const Twine &Name = "",
-                        Instruction *InsertBefore = nullptr) {
+                        InsertPosition InsertBefore = nullptr) {
     UnaryOperator *UO = Create(Opc, V, Name, InsertBefore);
     UO->copyIRFlags(CopyO);
     return UO;
@@ -165,7 +145,7 @@ public:
 
   static UnaryOperator *CreateFNegFMF(Value *Op, Instruction *FMFSource,
                                       const Twine &Name = "",
-                                      Instruction *InsertBefore = nullptr) {
+                                      InsertPosition InsertBefore = nullptr) {
     return CreateWithCopiedFlags(Instruction::FNeg, Op, FMFSource, Name,
                                  InsertBefore);
   }
@@ -188,13 +168,13 @@ public:
 //===----------------------------------------------------------------------===//
 
 class BinaryOperator : public Instruction {
+  constexpr static IntrusiveOperandsAllocMarker AllocMarker{2};
+
   void AssertOK();
 
 protected:
   BinaryOperator(BinaryOps iType, Value *S1, Value *S2, Type *Ty,
-                 const Twine &Name, Instruction *InsertBefore);
-  BinaryOperator(BinaryOps iType, Value *S1, Value *S2, Type *Ty,
-                 const Twine &Name, BasicBlock *InsertAtEnd);
+                 const Twine &Name, InsertPosition InsertBefore);
 
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -203,7 +183,7 @@ protected:
 
 public:
   // allocate space for exactly two operands
-  void *operator new(size_t S) { return User::operator new(S, 2); }
+  void *operator new(size_t S) { return User::operator new(S, AllocMarker); }
   void operator delete(void *Ptr) { User::operator delete(Ptr); }
 
   /// Transparently provide more efficient getOperand methods.
@@ -216,44 +196,57 @@ public:
   ///
   static BinaryOperator *Create(BinaryOps Op, Value *S1, Value *S2,
                                 const Twine &Name = Twine(),
-                                Instruction *InsertBefore = nullptr);
-
-  /// Construct a binary instruction, given the opcode and the two
-  /// operands.  Also automatically insert this instruction to the end of the
-  /// BasicBlock specified.
-  ///
-  static BinaryOperator *Create(BinaryOps Op, Value *S1, Value *S2,
-                                const Twine &Name, BasicBlock *InsertAtEnd);
+                                InsertPosition InsertBefore = nullptr);
 
   /// These methods just forward to Create, and are useful when you
   /// statically know what type of instruction you're going to create.  These
   /// helpers just save some typing.
-#define HANDLE_BINARY_INST(N, OPC, CLASS) \
-  static BinaryOperator *Create##OPC(Value *V1, Value *V2, \
-                                     const Twine &Name = "") {\
-    return Create(Instruction::OPC, V1, V2, Name);\
+#define HANDLE_BINARY_INST(N, OPC, CLASS)                                      \
+  static BinaryOperator *Create##OPC(Value *V1, Value *V2,                     \
+                                     const Twine &Name = "") {                 \
+    return Create(Instruction::OPC, V1, V2, Name);                             \
   }
 #include "llvm/IR/Instruction.def"
-#define HANDLE_BINARY_INST(N, OPC, CLASS) \
-  static BinaryOperator *Create##OPC(Value *V1, Value *V2, \
-                                     const Twine &Name, BasicBlock *BB) {\
-    return Create(Instruction::OPC, V1, V2, Name, BB);\
-  }
-#include "llvm/IR/Instruction.def"
-#define HANDLE_BINARY_INST(N, OPC, CLASS) \
-  static BinaryOperator *Create##OPC(Value *V1, Value *V2, \
-                                     const Twine &Name, Instruction *I) {\
-    return Create(Instruction::OPC, V1, V2, Name, I);\
+#define HANDLE_BINARY_INST(N, OPC, CLASS)                                      \
+  static BinaryOperator *Create##OPC(Value *V1, Value *V2, const Twine &Name,  \
+                                     InsertPosition InsertBefore) {            \
+    return Create(Instruction::OPC, V1, V2, Name, InsertBefore);               \
   }
 #include "llvm/IR/Instruction.def"
 
   static BinaryOperator *
-  CreateWithCopiedFlags(BinaryOps Opc, Value *V1, Value *V2, Instruction *CopyO,
+  CreateWithCopiedFlags(BinaryOps Opc, Value *V1, Value *V2, Value *CopyO,
                         const Twine &Name = "",
-                        Instruction *InsertBefore = nullptr) {
+                        InsertPosition InsertBefore = nullptr) {
     BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
     BO->copyIRFlags(CopyO);
     return BO;
+  }
+
+  static BinaryOperator *CreateWithFMF(BinaryOps Opc, Value *V1, Value *V2,
+                                       FastMathFlags FMF,
+                                       const Twine &Name = "",
+                                       InsertPosition InsertBefore = nullptr) {
+    BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
+    BO->setFastMathFlags(FMF);
+    return BO;
+  }
+
+  static BinaryOperator *CreateFAddFMF(Value *V1, Value *V2, FastMathFlags FMF,
+                                       const Twine &Name = "") {
+    return CreateWithFMF(Instruction::FAdd, V1, V2, FMF, Name);
+  }
+  static BinaryOperator *CreateFSubFMF(Value *V1, Value *V2, FastMathFlags FMF,
+                                       const Twine &Name = "") {
+    return CreateWithFMF(Instruction::FSub, V1, V2, FMF, Name);
+  }
+  static BinaryOperator *CreateFMulFMF(Value *V1, Value *V2, FastMathFlags FMF,
+                                       const Twine &Name = "") {
+    return CreateWithFMF(Instruction::FMul, V1, V2, FMF, Name);
+  }
+  static BinaryOperator *CreateFDivFMF(Value *V1, Value *V2, FastMathFlags FMF,
+                                       const Twine &Name = "") {
+    return CreateWithFMF(Instruction::FDiv, V1, V2, FMF, Name);
   }
 
   static BinaryOperator *CreateFAddFMF(Value *V1, Value *V2,
@@ -288,15 +281,11 @@ public:
     BO->setHasNoSignedWrap(true);
     return BO;
   }
+
   static BinaryOperator *CreateNSW(BinaryOps Opc, Value *V1, Value *V2,
-                                   const Twine &Name, BasicBlock *BB) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, BB);
-    BO->setHasNoSignedWrap(true);
-    return BO;
-  }
-  static BinaryOperator *CreateNSW(BinaryOps Opc, Value *V1, Value *V2,
-                                   const Twine &Name, Instruction *I) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, I);
+                                   const Twine &Name,
+                                   InsertPosition InsertBefore) {
+    BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
     BO->setHasNoSignedWrap(true);
     return BO;
   }
@@ -307,15 +296,11 @@ public:
     BO->setHasNoUnsignedWrap(true);
     return BO;
   }
+
   static BinaryOperator *CreateNUW(BinaryOps Opc, Value *V1, Value *V2,
-                                   const Twine &Name, BasicBlock *BB) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, BB);
-    BO->setHasNoUnsignedWrap(true);
-    return BO;
-  }
-  static BinaryOperator *CreateNUW(BinaryOps Opc, Value *V1, Value *V2,
-                                   const Twine &Name, Instruction *I) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, I);
+                                   const Twine &Name,
+                                   InsertPosition InsertBefore) {
+    BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
     BO->setHasNoUnsignedWrap(true);
     return BO;
   }
@@ -326,18 +311,20 @@ public:
     BO->setIsExact(true);
     return BO;
   }
+
   static BinaryOperator *CreateExact(BinaryOps Opc, Value *V1, Value *V2,
-                                     const Twine &Name, BasicBlock *BB) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, BB);
+                                     const Twine &Name,
+                                     InsertPosition InsertBefore) {
+    BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
     BO->setIsExact(true);
     return BO;
   }
-  static BinaryOperator *CreateExact(BinaryOps Opc, Value *V1, Value *V2,
-                                     const Twine &Name, Instruction *I) {
-    BinaryOperator *BO = Create(Opc, V1, V2, Name, I);
-    BO->setIsExact(true);
-    return BO;
-  }
+
+  static inline BinaryOperator *
+  CreateDisjoint(BinaryOps Opc, Value *V1, Value *V2, const Twine &Name = "");
+  static inline BinaryOperator *CreateDisjoint(BinaryOps Opc, Value *V1,
+                                               Value *V2, const Twine &Name,
+                                               InsertPosition InsertBefore);
 
 #define DEFINE_HELPERS(OPC, NUWNSWEXACT)                                       \
   static BinaryOperator *Create##NUWNSWEXACT##OPC(Value *V1, Value *V2,        \
@@ -345,12 +332,9 @@ public:
     return Create##NUWNSWEXACT(Instruction::OPC, V1, V2, Name);                \
   }                                                                            \
   static BinaryOperator *Create##NUWNSWEXACT##OPC(                             \
-      Value *V1, Value *V2, const Twine &Name, BasicBlock *BB) {               \
-    return Create##NUWNSWEXACT(Instruction::OPC, V1, V2, Name, BB);            \
-  }                                                                            \
-  static BinaryOperator *Create##NUWNSWEXACT##OPC(                             \
-      Value *V1, Value *V2, const Twine &Name, Instruction *I) {               \
-    return Create##NUWNSWEXACT(Instruction::OPC, V1, V2, Name, I);             \
+      Value *V1, Value *V2, const Twine &Name,                                 \
+      InsertPosition InsertBefore = nullptr) {                                 \
+    return Create##NUWNSWEXACT(Instruction::OPC, V1, V2, Name, InsertBefore);  \
   }
 
   DEFINE_HELPERS(Add, NSW) // CreateNSWAdd
@@ -367,6 +351,8 @@ public:
   DEFINE_HELPERS(AShr, Exact)  // CreateExactAShr
   DEFINE_HELPERS(LShr, Exact)  // CreateExactLShr
 
+  DEFINE_HELPERS(Or, Disjoint) // CreateDisjointOr
+
 #undef DEFINE_HELPERS
 
   /// Helper functions to construct and inspect unary operations (NEG and NOT)
@@ -375,21 +361,11 @@ public:
   /// Create the NEG and NOT instructions out of SUB and XOR instructions.
   ///
   static BinaryOperator *CreateNeg(Value *Op, const Twine &Name = "",
-                                   Instruction *InsertBefore = nullptr);
-  static BinaryOperator *CreateNeg(Value *Op, const Twine &Name,
-                                   BasicBlock *InsertAtEnd);
+                                   InsertPosition InsertBefore = nullptr);
   static BinaryOperator *CreateNSWNeg(Value *Op, const Twine &Name = "",
-                                      Instruction *InsertBefore = nullptr);
-  static BinaryOperator *CreateNSWNeg(Value *Op, const Twine &Name,
-                                      BasicBlock *InsertAtEnd);
-  static BinaryOperator *CreateNUWNeg(Value *Op, const Twine &Name = "",
-                                      Instruction *InsertBefore = nullptr);
-  static BinaryOperator *CreateNUWNeg(Value *Op, const Twine &Name,
-                                      BasicBlock *InsertAtEnd);
+                                      InsertPosition InsertBefore = nullptr);
   static BinaryOperator *CreateNot(Value *Op, const Twine &Name = "",
-                                   Instruction *InsertBefore = nullptr);
-  static BinaryOperator *CreateNot(Value *Op, const Twine &Name,
-                                   BasicBlock *InsertAtEnd);
+                                   InsertPosition InsertBefore = nullptr);
 
   BinaryOps getOpcode() const {
     return static_cast<BinaryOps>(Instruction::getOpcode());
@@ -418,6 +394,43 @@ struct OperandTraits<BinaryOperator> :
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BinaryOperator, Value)
 
+/// An or instruction, which can be marked as "disjoint", indicating that the
+/// inputs don't have a 1 in the same bit position. Meaning this instruction
+/// can also be treated as an add.
+class PossiblyDisjointInst : public BinaryOperator {
+public:
+  enum { IsDisjoint = (1 << 0) };
+
+  void setIsDisjoint(bool B) {
+    SubclassOptionalData =
+        (SubclassOptionalData & ~IsDisjoint) | (B * IsDisjoint);
+  }
+
+  bool isDisjoint() const { return SubclassOptionalData & IsDisjoint; }
+
+  static bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::Or;
+  }
+
+  static bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+BinaryOperator *BinaryOperator::CreateDisjoint(BinaryOps Opc, Value *V1,
+                                               Value *V2, const Twine &Name) {
+  BinaryOperator *BO = Create(Opc, V1, V2, Name);
+  cast<PossiblyDisjointInst>(BO)->setIsDisjoint(true);
+  return BO;
+}
+BinaryOperator *BinaryOperator::CreateDisjoint(BinaryOps Opc, Value *V1,
+                                               Value *V2, const Twine &Name,
+                                               InsertPosition InsertBefore) {
+  BinaryOperator *BO = Create(Opc, V1, V2, Name, InsertBefore);
+  cast<PossiblyDisjointInst>(BO)->setIsDisjoint(true);
+  return BO;
+}
+
 //===----------------------------------------------------------------------===//
 //                               CastInst Class
 //===----------------------------------------------------------------------===//
@@ -431,15 +444,9 @@ DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BinaryOperator, Value)
 class CastInst : public UnaryInstruction {
 protected:
   /// Constructor with insert-before-instruction semantics for subclasses
-  CastInst(Type *Ty, unsigned iType, Value *S,
-           const Twine &NameStr = "", Instruction *InsertBefore = nullptr)
-    : UnaryInstruction(Ty, iType, S, InsertBefore) {
-    setName(NameStr);
-  }
-  /// Constructor with insert-at-end-of-block semantics for subclasses
-  CastInst(Type *Ty, unsigned iType, Value *S,
-           const Twine &NameStr, BasicBlock *InsertAtEnd)
-    : UnaryInstruction(Ty, iType, S, InsertAtEnd) {
+  CastInst(Type *Ty, unsigned iType, Value *S, const Twine &NameStr = "",
+           InsertPosition InsertBefore = nullptr)
+      : UnaryInstruction(Ty, iType, S, InsertBefore) {
     setName(NameStr);
   }
 
@@ -451,88 +458,43 @@ public:
   /// insert the new CastInst before InsertBefore (if it is non-null).
   /// Construct any of the CastInst subclasses
   static CastInst *Create(
-    Instruction::CastOps,    ///< The opcode of the cast instruction
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-  /// Provides a way to construct any of the CastInst subclasses using an
-  /// opcode instead of the subclass's constructor. The opcode must be in the
-  /// CastOps category. This constructor has insert-at-end-of-block semantics
-  /// to automatically insert the new CastInst at the end of InsertAtEnd (if
-  /// its non-null).
-  /// Construct any of the CastInst subclasses
-  static CastInst *Create(
-    Instruction::CastOps,    ///< The opcode for the cast instruction
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Instruction::CastOps,   ///< The opcode of the cast instruction
+      Value *S,               ///< The value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a ZExt or BitCast cast instruction
   static CastInst *CreateZExtOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-
-  /// Create a ZExt or BitCast cast instruction
-  static CastInst *CreateZExtOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Value *S,               ///< The value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a SExt or BitCast cast instruction
   static CastInst *CreateSExtOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-
-  /// Create a SExt or BitCast cast instruction
-  static CastInst *CreateSExtOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
-  );
-
-  /// Create a BitCast AddrSpaceCast, or a PtrToInt cast instruction.
-  static CastInst *CreatePointerCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Value *S,               ///< The value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a BitCast, AddrSpaceCast or a PtrToInt cast instruction.
   static CastInst *CreatePointerCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
+      Value *S,               ///< The pointer value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a BitCast or an AddrSpaceCast cast instruction.
   static CastInst *CreatePointerBitCastOrAddrSpaceCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
-  );
-
-  /// Create a BitCast or an AddrSpaceCast cast instruction.
-  static CastInst *CreatePointerBitCastOrAddrSpaceCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
+      Value *S,               ///< The pointer value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a BitCast, a PtrToInt, or an IntToPTr cast instruction.
@@ -542,60 +504,35 @@ public:
   /// destination a pointer type, creates an IntToPtr cast. Otherwise, creates
   /// a bitcast.
   static CastInst *CreateBitOrPointerCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
+      Value *S,               ///< The pointer value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a ZExt, BitCast, or Trunc for int -> int casts.
   static CastInst *CreateIntegerCast(
-    Value *S,                ///< The pointer value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    bool isSigned,           ///< Whether to regard S as signed or not
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-
-  /// Create a ZExt, BitCast, or Trunc for int -> int casts.
-  static CastInst *CreateIntegerCast(
-    Value *S,                ///< The integer value to be casted (operand 0)
-    Type *Ty,          ///< The integer type to which operand is casted
-    bool isSigned,           ///< Whether to regard S as signed or not
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Value *S,               ///< The pointer value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      bool isSigned,          ///< Whether to regard S as signed or not
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create an FPExt, BitCast, or FPTrunc for fp -> fp casts
   static CastInst *CreateFPCast(
-    Value *S,                ///< The floating point value to be casted
-    Type *Ty,          ///< The floating point type to cast to
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-
-  /// Create an FPExt, BitCast, or FPTrunc for fp -> fp casts
-  static CastInst *CreateFPCast(
-    Value *S,                ///< The floating point value to be casted
-    Type *Ty,          ///< The floating point type to cast to
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Value *S,               ///< The floating point value to be casted
+      Type *Ty,               ///< The floating point type to cast to
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Create a Trunc or BitCast cast instruction
   static CastInst *CreateTruncOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which cast should be made
-    const Twine &Name = "", ///< Name for the instruction
-    Instruction *InsertBefore = nullptr ///< Place to insert the instruction
-  );
-
-  /// Create a Trunc or BitCast cast instruction
-  static CastInst *CreateTruncOrBitCast(
-    Value *S,                ///< The value to be casted (operand 0)
-    Type *Ty,          ///< The type to which operand is casted
-    const Twine &Name, ///< The name for the instruction
-    BasicBlock *InsertAtEnd  ///< The block to insert the instruction into
+      Value *S,               ///< The value to be casted (operand 0)
+      Type *Ty,               ///< The type to which cast should be made
+      const Twine &Name = "", ///< Name for the instruction
+      InsertPosition InsertBefore = nullptr ///< Place to insert the instruction
   );
 
   /// Check whether a bitcast between these types is valid
@@ -630,13 +567,6 @@ public:
   /// @returns true iff the cast has only integral typed operand and dest type.
   /// Determine if this is an integer-only cast.
   bool isIntegerCast() const;
-
-  /// A lossless cast is one that does not alter the basic value. It implies
-  /// a no-op cast but is more stringent, preventing things like int->float,
-  /// long->double, or int->ptr.
-  /// @returns true iff the cast is lossless.
-  /// Determine if this is a lossless cast.
-  bool isLosslessCast() const;
 
   /// A no-op cast is one that can be effected without changing any bits.
   /// It implies that the source and destination types are the same size. The
@@ -702,6 +632,26 @@ public:
   }
 };
 
+/// Instruction that can have a nneg flag (zext/uitofp).
+class PossiblyNonNegInst : public CastInst {
+public:
+  enum { NonNeg = (1 << 0) };
+
+  static bool classof(const Instruction *I) {
+    switch (I->getOpcode()) {
+    case Instruction::ZExt:
+    case Instruction::UIToFP:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  static bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
 //===----------------------------------------------------------------------===//
 //                               CmpInst Class
 //===----------------------------------------------------------------------===//
@@ -709,6 +659,8 @@ public:
 /// This class is the base class for the comparison instructions.
 /// Abstract base class of comparison instructions.
 class CmpInst : public Instruction {
+  constexpr static IntrusiveOperandsAllocMarker AllocMarker{2};
+
 public:
   /// This enumeration lists the possible predicates for CmpInst subclasses.
   /// Values in the range 0-31 are reserved for FCmpInst, while values in the
@@ -771,18 +723,14 @@ public:
   }
 
 protected:
-  CmpInst(Type *ty, Instruction::OtherOps op, Predicate pred,
-          Value *LHS, Value *RHS, const Twine &Name = "",
-          Instruction *InsertBefore = nullptr,
+  CmpInst(Type *ty, Instruction::OtherOps op, Predicate pred, Value *LHS,
+          Value *RHS, const Twine &Name = "",
+          InsertPosition InsertBefore = nullptr,
           Instruction *FlagsSource = nullptr);
-
-  CmpInst(Type *ty, Instruction::OtherOps op, Predicate pred,
-          Value *LHS, Value *RHS, const Twine &Name,
-          BasicBlock *InsertAtEnd);
 
 public:
   // allocate space for exactly two operands
-  void *operator new(size_t S) { return User::operator new(S, 2); }
+  void *operator new(size_t S) { return User::operator new(S, AllocMarker); }
   void operator delete(void *Ptr) { User::operator delete(Ptr); }
 
   /// Construct a compare instruction, given the opcode, the predicate and
@@ -790,17 +738,21 @@ public:
   /// instruction into a BasicBlock right before the specified instruction.
   /// The specified Instruction is allowed to be a dereferenced end iterator.
   /// Create a CmpInst
-  static CmpInst *Create(OtherOps Op,
-                         Predicate predicate, Value *S1,
-                         Value *S2, const Twine &Name = "",
-                         Instruction *InsertBefore = nullptr);
+  static CmpInst *Create(OtherOps Op, Predicate Pred, Value *S1, Value *S2,
+                         const Twine &Name = "",
+                         InsertPosition InsertBefore = nullptr);
 
-  /// Construct a compare instruction, given the opcode, the predicate and the
-  /// two operands.  Also automatically insert this instruction to the end of
-  /// the BasicBlock specified.
+  /// Construct a compare instruction, given the opcode, the predicate,
+  /// the two operands and the instruction to copy the flags from. Optionally
+  /// (if InstBefore is specified) insert the instruction into a BasicBlock
+  /// right before the specified instruction. The specified Instruction is
+  /// allowed to be a dereferenced end iterator.
   /// Create a CmpInst
-  static CmpInst *Create(OtherOps Op, Predicate predicate, Value *S1,
-                         Value *S2, const Twine &Name, BasicBlock *InsertAtEnd);
+  static CmpInst *CreateWithCopiedFlags(OtherOps Op, Predicate Pred, Value *S1,
+                                        Value *S2,
+                                        const Instruction *FlagsSource,
+                                        const Twine &Name = "",
+                                        InsertPosition InsertBefore = nullptr);
 
   /// Get the opcode casted to the right type
   OtherOps getOpcode() const {
@@ -834,6 +786,28 @@ public:
   /// Return the inverse of the instruction's predicate.
   Predicate getInversePredicate() const {
     return getInversePredicate(getPredicate());
+  }
+
+  /// Returns the ordered variant of a floating point compare.
+  ///
+  /// For example, UEQ -> OEQ, ULT -> OLT, OEQ -> OEQ
+  static Predicate getOrderedPredicate(Predicate Pred) {
+    return static_cast<Predicate>(Pred & FCMP_ORD);
+  }
+
+  Predicate getOrderedPredicate() const {
+    return getOrderedPredicate(getPredicate());
+  }
+
+  /// Returns the unordered variant of a floating point compare.
+  ///
+  /// For example, OEQ -> UEQ, OLT -> ULT, OEQ -> UEQ
+  static Predicate getUnorderedPredicate(Predicate Pred) {
+    return static_cast<Predicate>(Pred | FCMP_UNO);
+  }
+
+  Predicate getUnorderedPredicate() const {
+    return getUnorderedPredicate(getPredicate());
   }
 
   /// For example, EQ -> NE, UGT -> ULE, SLT -> SGE,
@@ -1066,6 +1040,8 @@ struct OperandTraits<CmpInst> : public FixedNumOperandTraits<CmpInst, 2> {
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CmpInst, Value)
 
+raw_ostream &operator<<(raw_ostream &OS, CmpInst::Predicate Pred);
+
 /// A lightweight accessor for an operand bundle meant to be passed
 /// around by value.
 struct OperandBundleUse {
@@ -1224,25 +1200,32 @@ public:
   /// the operand bundles for the new instruction are set to the operand bundles
   /// in \p Bundles.
   static CallBase *Create(CallBase *CB, ArrayRef<OperandBundleDef> Bundles,
-                          Instruction *InsertPt = nullptr);
+                          InsertPosition InsertPt = nullptr);
 
   /// Create a clone of \p CB with the operand bundle with the tag matching
   /// \p Bundle's tag replaced with Bundle, and insert it before \p InsertPt.
   ///
   /// The returned call instruction is identical \p CI in every way except that
   /// the specified operand bundle has been replaced.
-  static CallBase *Create(CallBase *CB,
-                          OperandBundleDef Bundle,
-                          Instruction *InsertPt = nullptr);
+  static CallBase *Create(CallBase *CB, OperandBundleDef Bundle,
+                          InsertPosition InsertPt = nullptr);
 
   /// Create a clone of \p CB with operand bundle \p OB added.
   static CallBase *addOperandBundle(CallBase *CB, uint32_t ID,
                                     OperandBundleDef OB,
-                                    Instruction *InsertPt = nullptr);
+                                    InsertPosition InsertPt = nullptr);
 
   /// Create a clone of \p CB with operand bundle \p ID removed.
   static CallBase *removeOperandBundle(CallBase *CB, uint32_t ID,
-                                       Instruction *InsertPt = nullptr);
+                                       InsertPosition InsertPt = nullptr);
+
+  /// Return the convergence control token for this call, if it exists.
+  Value *getConvergenceControlToken() const {
+    if (auto Bundle = getOperandBundle(llvm::LLVMContext::OB_convergencectrl)) {
+      return Bundle->Inputs[0].get();
+    }
+    return nullptr;
+  }
 
   static bool classof(const Instruction *I) {
     return I->getOpcode() == Instruction::Call ||
@@ -1393,10 +1376,13 @@ public:
   const Use &getCalledOperandUse() const { return Op<CalledOperandOpEndIdx>(); }
   Use &getCalledOperandUse() { return Op<CalledOperandOpEndIdx>(); }
 
-  /// Returns the function called, or null if this is an
-  /// indirect function invocation.
+  /// Returns the function called, or null if this is an indirect function
+  /// invocation or the function signature does not match the call signature.
   Function *getCalledFunction() const {
-    return dyn_cast_or_null<Function>(getCalledOperand());
+    if (auto *F = dyn_cast_or_null<Function>(getCalledOperand()))
+      if (F->getValueType() == getFunctionType())
+        return F;
+    return nullptr;
   }
 
   /// Return true if the callsite is an indirect call.
@@ -1444,7 +1430,6 @@ public:
   /// type.
   void setCalledFunction(FunctionType *FTy, Value *Fn) {
     this->FTy = FTy;
-    assert(cast<PointerType>(Fn->getType())->isOpaqueOrPointeeTypeMatches(FTy));
     // This function doesn't mutate the return type, only the function
     // type. Seems broken, but I'm just gonna stick an assert in for now.
     assert(getType() == FTy->getReturnType());
@@ -1468,13 +1453,37 @@ public:
   /// looking through to the attributes on the called function when necessary).
   ///@{
 
-  /// Return the parameter attributes for this call.
-  ///
+  /// Return the attributes for this call.
   AttributeList getAttributes() const { return Attrs; }
 
-  /// Set the parameter attributes for this call.
-  ///
+  /// Set the attributes for this call.
   void setAttributes(AttributeList A) { Attrs = A; }
+
+  /// Return the return attributes for this call.
+  AttributeSet getRetAttributes() const {
+    return getAttributes().getRetAttrs();
+  }
+
+  /// Return the param attributes for this call.
+  AttributeSet getParamAttributes(unsigned ArgNo) const {
+    return getAttributes().getParamAttrs(ArgNo);
+  }
+
+  /// Try to intersect the attributes from 'this' CallBase and the
+  /// 'Other' CallBase. Sets the intersected attributes to 'this' and
+  /// return true if successful. Doesn't modify 'this' and returns
+  /// false if unsuccessful.
+  bool tryIntersectAttributes(const CallBase *Other) {
+    if (this == Other)
+      return true;
+    AttributeList AL = getAttributes();
+    AttributeList ALOther = Other->getAttributes();
+    auto Intersected = AL.intersectWith(getContext(), ALOther);
+    if (!Intersected)
+      return false;
+    setAttributes(*Intersected);
+    return true;
+  }
 
   /// Determine whether this call has the given attribute. If it does not
   /// then determine if the called function has the attribute, but only if
@@ -1544,12 +1553,17 @@ public:
   }
 
   /// Removes the attributes from the function
-  void removeFnAttrs(const AttrBuilder &AttrsToRemove) {
+  void removeFnAttrs(const AttributeMask &AttrsToRemove) {
     Attrs = Attrs.removeFnAttributes(getContext(), AttrsToRemove);
   }
 
   /// Removes the attribute from the function
   void removeFnAttr(Attribute::AttrKind Kind) {
+    Attrs = Attrs.removeFnAttribute(getContext(), Kind);
+  }
+
+  /// Removes the attribute from the function
+  void removeFnAttr(StringRef Kind) {
     Attrs = Attrs.removeFnAttribute(getContext(), Kind);
   }
 
@@ -1559,7 +1573,7 @@ public:
   }
 
   /// Removes the attributes from the return value
-  void removeRetAttrs(const AttrBuilder &AttrsToRemove) {
+  void removeRetAttrs(const AttributeMask &AttrsToRemove) {
     Attrs = Attrs.removeRetAttributes(getContext(), AttrsToRemove);
   }
 
@@ -1576,7 +1590,7 @@ public:
   }
 
   /// Removes the attributes from the given argument
-  void removeParamAttrs(unsigned ArgNo, const AttrBuilder &AttrsToRemove) {
+  void removeParamAttrs(unsigned ArgNo, const AttributeMask &AttrsToRemove) {
     Attrs = Attrs.removeParamAttributes(getContext(), ArgNo, AttrsToRemove);
   }
 
@@ -1590,12 +1604,29 @@ public:
     Attrs = Attrs.addDereferenceableRetAttr(getContext(), Bytes);
   }
 
+  /// adds the range attribute to the list of attributes.
+  void addRangeRetAttr(const ConstantRange &CR) {
+    Attrs = Attrs.addRangeRetAttr(getContext(), CR);
+  }
+
   /// Determine whether the return value has the given attribute.
   bool hasRetAttr(Attribute::AttrKind Kind) const {
     return hasRetAttrImpl(Kind);
   }
   /// Determine whether the return value has the given attribute.
   bool hasRetAttr(StringRef Kind) const { return hasRetAttrImpl(Kind); }
+
+  /// Return the attribute for the given attribute kind for the return value.
+  Attribute getRetAttr(Attribute::AttrKind Kind) const {
+    Attribute RetAttr = Attrs.getRetAttr(Kind);
+    if (RetAttr.isValid())
+      return RetAttr;
+
+    // Look at the callee, if available.
+    if (const Function *F = getCalledFunction())
+      return F->getRetAttribute(Kind);
+    return Attribute();
+  }
 
   /// Determine whether the argument or parameter has the given attribute.
   bool paramHasAttr(unsigned ArgNo, Attribute::AttrKind Kind) const;
@@ -1612,24 +1643,36 @@ public:
 
   /// Get the attribute of a given kind for the function.
   Attribute getFnAttr(StringRef Kind) const {
-    return getAttributes().getFnAttr(Kind);
+    Attribute Attr = getAttributes().getFnAttr(Kind);
+    if (Attr.isValid())
+      return Attr;
+    return getFnAttrOnCalledFunction(Kind);
   }
 
   /// Get the attribute of a given kind for the function.
   Attribute getFnAttr(Attribute::AttrKind Kind) const {
-    return getAttributes().getFnAttr(Kind);
+    Attribute A = getAttributes().getFnAttr(Kind);
+    if (A.isValid())
+      return A;
+    return getFnAttrOnCalledFunction(Kind);
   }
 
   /// Get the attribute of a given kind from a given arg
   Attribute getParamAttr(unsigned ArgNo, Attribute::AttrKind Kind) const {
     assert(ArgNo < arg_size() && "Out of bounds");
-    return getAttributes().getParamAttr(ArgNo, Kind);
+    Attribute A = getAttributes().getParamAttr(ArgNo, Kind);
+    if (A.isValid())
+      return A;
+    return getParamAttrOnCalledFunction(ArgNo, Kind);
   }
 
   /// Get the attribute of a given kind from a given arg
   Attribute getParamAttr(unsigned ArgNo, StringRef Kind) const {
     assert(ArgNo < arg_size() && "Out of bounds");
-    return getAttributes().getParamAttr(ArgNo, Kind);
+    Attribute A = getAttributes().getParamAttr(ArgNo, Kind);
+    if (A.isValid())
+      return A;
+    return getParamAttrOnCalledFunction(ArgNo, Kind);
   }
 
   /// Return true if the data operand at index \p i has the attribute \p
@@ -1717,13 +1760,19 @@ public:
 
   // FIXME: Once this API is no longer duplicated in `CallSite`, rename this to
   // better indicate that this may return a conservative answer.
-  bool doesNotReadMemory(unsigned OpNo) const {
+  bool onlyWritesMemory(unsigned OpNo) const {
     return dataOperandHasImpliedAttr(OpNo, Attribute::WriteOnly) ||
            dataOperandHasImpliedAttr(OpNo, Attribute::ReadNone);
   }
 
   /// Extract the alignment of the return value.
-  MaybeAlign getRetAlign() const { return Attrs.getRetAlignment(); }
+  MaybeAlign getRetAlign() const {
+    if (auto Align = Attrs.getRetAlignment())
+      return Align;
+    if (const Function *F = getCalledFunction())
+      return F->getAttributes().getRetAlignment();
+    return std::nullopt;
+  }
 
   /// Extract the alignment for a call or parameter (0=unknown).
   MaybeAlign getParamAlign(unsigned ArgNo) const {
@@ -1732,6 +1781,15 @@ public:
 
   MaybeAlign getParamStackAlign(unsigned ArgNo) const {
     return Attrs.getParamStackAlignment(ArgNo);
+  }
+
+  /// Extract the byref type for a call or parameter.
+  Type *getParamByRefType(unsigned ArgNo) const {
+    if (auto *Ty = Attrs.getParamByRefType(ArgNo))
+      return Ty;
+    if (const Function *F = getCalledFunction())
+      return F->getAttributes().getParamByRefType(ArgNo);
+    return nullptr;
   }
 
   /// Extract the byval type for a call or parameter.
@@ -1752,7 +1810,7 @@ public:
     return nullptr;
   }
 
-  /// Extract the preallocated type for a call or parameter.
+  /// Extract the inalloca type for a call or parameter.
   Type *getParamInAllocaType(unsigned ArgNo) const {
     if (auto *Ty = Attrs.getParamInAllocaType(ArgNo))
       return Ty;
@@ -1761,10 +1819,29 @@ public:
     return nullptr;
   }
 
+  /// Extract the sret type for a call or parameter.
+  Type *getParamStructRetType(unsigned ArgNo) const {
+    if (auto *Ty = Attrs.getParamStructRetType(ArgNo))
+      return Ty;
+    if (const Function *F = getCalledFunction())
+      return F->getAttributes().getParamStructRetType(ArgNo);
+    return nullptr;
+  }
+
+  /// Extract the elementtype type for a parameter.
+  /// Note that elementtype() can only be applied to call arguments, not
+  /// function declaration parameters.
+  Type *getParamElementType(unsigned ArgNo) const {
+    return Attrs.getParamElementType(ArgNo);
+  }
+
   /// Extract the number of dereferenceable bytes for a call or
   /// parameter (0=unknown).
   uint64_t getRetDereferenceableBytes() const {
-    return Attrs.getRetDereferenceableBytes();
+    uint64_t Bytes = Attrs.getRetDereferenceableBytes();
+    if (const Function *F = getCalledFunction())
+      Bytes = std::max(Bytes, F->getAttributes().getRetDereferenceableBytes());
+    return Bytes;
   }
 
   /// Extract the number of dereferenceable bytes for a call or
@@ -1776,7 +1853,13 @@ public:
   /// Extract the number of dereferenceable_or_null bytes for a call
   /// (0=unknown).
   uint64_t getRetDereferenceableOrNullBytes() const {
-    return Attrs.getRetDereferenceableOrNullBytes();
+    uint64_t Bytes = Attrs.getRetDereferenceableOrNullBytes();
+    if (const Function *F = getCalledFunction()) {
+      Bytes = std::max(Bytes,
+                       F->getAttributes().getRetDereferenceableOrNullBytes());
+    }
+
+    return Bytes;
   }
 
   /// Extract the number of dereferenceable_or_null bytes for a
@@ -1784,6 +1867,18 @@ public:
   uint64_t getParamDereferenceableOrNullBytes(unsigned i) const {
     return Attrs.getParamDereferenceableOrNullBytes(i);
   }
+
+  /// Extract a test mask for disallowed floating-point value classes for the
+  /// return value.
+  FPClassTest getRetNoFPClass() const;
+
+  /// Extract a test mask for disallowed floating-point value classes for the
+  /// parameter.
+  FPClassTest getParamNoFPClass(unsigned i) const;
+
+  /// If this return value has a range attribute, return the value range of the
+  /// argument. Otherwise, std::nullopt is returned.
+  std::optional<ConstantRange> getRange() const;
 
   /// Return true if the return value is known to be not null.
   /// This may be because it has the nonnull attribute, or because at least
@@ -1797,7 +1892,13 @@ public:
 
   /// If one of the arguments has the 'returned' attribute, returns its
   /// operand value. Otherwise, return nullptr.
-  Value *getReturnedArgOperand() const;
+  Value *getReturnedArgOperand() const {
+    return getArgOperandWithAttribute(Attribute::Returned);
+  }
+
+  /// If one of the arguments has the specified attribute, returns its
+  /// operand value. Otherwise, return nullptr.
+  Value *getArgOperandWithAttribute(Attribute::AttrKind Kind) const;
 
   /// Return true if the call should not be treated as a call to a
   /// builtin.
@@ -1812,47 +1913,37 @@ public:
   /// Return true if the call should not be inlined.
   bool isNoInline() const { return hasFnAttr(Attribute::NoInline); }
   void setIsNoInline() { addFnAttr(Attribute::NoInline); }
+
+  MemoryEffects getMemoryEffects() const;
+  void setMemoryEffects(MemoryEffects ME);
+
   /// Determine if the call does not access memory.
-  bool doesNotAccessMemory() const { return hasFnAttr(Attribute::ReadNone); }
-  void setDoesNotAccessMemory() { addFnAttr(Attribute::ReadNone); }
+  bool doesNotAccessMemory() const;
+  void setDoesNotAccessMemory();
 
   /// Determine if the call does not access or only reads memory.
-  bool onlyReadsMemory() const {
-    return doesNotAccessMemory() || hasFnAttr(Attribute::ReadOnly);
-  }
-
-  void setOnlyReadsMemory() { addFnAttr(Attribute::ReadOnly); }
+  bool onlyReadsMemory() const;
+  void setOnlyReadsMemory();
 
   /// Determine if the call does not access or only writes memory.
-  bool doesNotReadMemory() const {
-    return doesNotAccessMemory() || hasFnAttr(Attribute::WriteOnly);
-  }
-  void setDoesNotReadMemory() { addFnAttr(Attribute::WriteOnly); }
+  bool onlyWritesMemory() const;
+  void setOnlyWritesMemory();
 
   /// Determine if the call can access memmory only using pointers based
   /// on its arguments.
-  bool onlyAccessesArgMemory() const {
-    return hasFnAttr(Attribute::ArgMemOnly);
-  }
-  void setOnlyAccessesArgMemory() { addFnAttr(Attribute::ArgMemOnly); }
+  bool onlyAccessesArgMemory() const;
+  void setOnlyAccessesArgMemory();
 
   /// Determine if the function may only access memory that is
   /// inaccessible from the IR.
-  bool onlyAccessesInaccessibleMemory() const {
-    return hasFnAttr(Attribute::InaccessibleMemOnly);
-  }
-  void setOnlyAccessesInaccessibleMemory() {
-    addFnAttr(Attribute::InaccessibleMemOnly);
-  }
+  bool onlyAccessesInaccessibleMemory() const;
+  void setOnlyAccessesInaccessibleMemory();
 
   /// Determine if the function may only access memory that is
   /// either inaccessible from the IR or pointed to by its arguments.
-  bool onlyAccessesInaccessibleMemOrArgMem() const {
-    return hasFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
-  }
-  void setOnlyAccessesInaccessibleMemOrArgMem() {
-    addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
-  }
+  bool onlyAccessesInaccessibleMemOrArgMem() const;
+  void setOnlyAccessesInaccessibleMemOrArgMem();
+
   /// Determine if the call cannot return.
   bool doesNotReturn() const { return hasFnAttr(Attribute::NoReturn); }
   void setDoesNotReturn() { addFnAttr(Attribute::NoReturn); }
@@ -1892,7 +1983,7 @@ public:
     return Attrs.hasAttrSomewhere(Attribute::ByVal);
   }
 
-  ///@{
+  ///@}
   // End of attribute API.
 
   /// \name Operand Bundle API
@@ -1989,7 +2080,7 @@ public:
   ///
   /// It is an error to call this for operand bundle types that may have
   /// multiple instances of them on the same instruction.
-  Optional<OperandBundleUse> getOperandBundle(StringRef Name) const {
+  std::optional<OperandBundleUse> getOperandBundle(StringRef Name) const {
     assert(countOperandBundlesOfType(Name) < 2 && "Precondition violated!");
 
     for (unsigned i = 0, e = getNumOperandBundles(); i != e; ++i) {
@@ -1998,14 +2089,14 @@ public:
         return U;
     }
 
-    return None;
+    return std::nullopt;
   }
 
   /// Return an operand bundle by tag ID, if present.
   ///
   /// It is an error to call this for operand bundle types that may have
   /// multiple instances of them on the same instruction.
-  Optional<OperandBundleUse> getOperandBundle(uint32_t ID) const {
+  std::optional<OperandBundleUse> getOperandBundle(uint32_t ID) const {
     assert(countOperandBundlesOfType(ID) < 2 && "Precondition violated!");
 
     for (unsigned i = 0, e = getNumOperandBundles(); i != e; ++i) {
@@ -2014,7 +2105,7 @@ public:
         return U;
     }
 
-    return None;
+    return std::nullopt;
   }
 
   /// Return the list of operand bundles attached to this instruction as
@@ -2040,19 +2131,7 @@ public:
 
   /// Return true if this operand bundle user has operand bundles that
   /// may write to the heap.
-  bool hasClobberingOperandBundles() const {
-    for (auto &BOI : bundle_op_infos()) {
-      if (BOI.Tag->second == LLVMContext::OB_deopt ||
-          BOI.Tag->second == LLVMContext::OB_funclet)
-        continue;
-
-      // This instruction has an operand bundle that is not known to us.
-      // Assume the worst.
-      return true;
-    }
-
-    return false;
-  }
+  bool hasClobberingOperandBundles() const;
 
   /// Return true if the bundle operand at index \p OpIdx has the
   /// attribute \p A.
@@ -2084,40 +2163,6 @@ public:
     return false;
   }
 
-  /// Is the function attribute S disallowed by some operand bundle on
-  /// this operand bundle user?
-  bool isFnAttrDisallowedByOpBundle(StringRef S) const {
-    // Operand bundles only possibly disallow readnone, readonly and argmemonly
-    // attributes.  All String attributes are fine.
-    return false;
-  }
-
-  /// Is the function attribute A disallowed by some operand bundle on
-  /// this operand bundle user?
-  bool isFnAttrDisallowedByOpBundle(Attribute::AttrKind A) const {
-    switch (A) {
-    default:
-      return false;
-
-    case Attribute::InaccessibleMemOrArgMemOnly:
-      return hasReadingOperandBundles();
-
-    case Attribute::InaccessibleMemOnly:
-      return hasReadingOperandBundles();
-
-    case Attribute::ArgMemOnly:
-      return hasReadingOperandBundles();
-
-    case Attribute::ReadNone:
-      return hasReadingOperandBundles();
-
-    case Attribute::ReadOnly:
-      return hasClobberingOperandBundles();
-    }
-
-    llvm_unreachable("switch has a default case!");
-  }
-
   /// Used to keep track of an operand bundle.  See the main comment on
   /// OperandBundleUser above.
   struct BundleOpInfo {
@@ -2142,7 +2187,7 @@ public:
   /// OperandBundleUse.
   OperandBundleUse
   operandBundleFromBundleOpInfo(const BundleOpInfo &BOI) const {
-    auto begin = op_begin();
+    const auto *begin = op_begin();
     ArrayRef<Use> Inputs(begin + BOI.Begin, begin + BOI.End);
     return OperandBundleUse(BOI.Tag, Inputs);
   }
@@ -2247,6 +2292,11 @@ public:
   op_iterator populateBundleOperandInfos(ArrayRef<OperandBundleDef> Bundles,
                                          const unsigned BeginIndex);
 
+  /// Return true if the call has deopt state bundle.
+  bool hasDeoptState() const {
+    return getOperandBundle(LLVMContext::OB_deopt).has_value();
+  }
+
 public:
   /// Return the BundleOpInfo for the operand at index OpIdx.
   ///
@@ -2261,7 +2311,7 @@ protected:
   /// Return the total number of values used in \p Bundles.
   static unsigned CountBundleInputs(ArrayRef<OperandBundleDef> Bundles) {
     unsigned Total = 0;
-    for (auto &B : Bundles)
+    for (const auto &B : Bundles)
       Total += B.input_size();
     return Total;
   }
@@ -2277,13 +2327,11 @@ private:
     if (Attrs.hasFnAttr(Kind))
       return true;
 
-    // Operand bundles override attributes on the called function, but don't
-    // override attributes directly present on the call instruction.
-    if (isFnAttrDisallowedByOpBundle(Kind))
-      return false;
-
     return hasFnAttrOnCalledFunction(Kind);
   }
+  template <typename AK> Attribute getFnAttrOnCalledFunction(AK Kind) const;
+  template <typename AK>
+  Attribute getParamAttrOnCalledFunction(unsigned ArgNo, AK Kind) const;
 
   /// Determine whether the return value has the given attribute. Supports
   /// Attribute::AttrKind and StringRef as \p AttrKind types.
@@ -2299,7 +2347,7 @@ private:
 };
 
 template <>
-struct OperandTraits<CallBase> : public VariadicOperandTraits<CallBase, 1> {};
+struct OperandTraits<CallBase> : public VariadicOperandTraits<CallBase> {};
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CallBase, Value)
 
@@ -2308,14 +2356,11 @@ DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CallBase, Value)
 //===----------------------------------------------------------------------===//
 class FuncletPadInst : public Instruction {
 private:
-  FuncletPadInst(const FuncletPadInst &CPI);
+  FuncletPadInst(const FuncletPadInst &CPI, AllocInfo AllocInfo);
 
   explicit FuncletPadInst(Instruction::FuncletPadOps Op, Value *ParentPad,
-                          ArrayRef<Value *> Args, unsigned Values,
-                          const Twine &NameStr, Instruction *InsertBefore);
-  explicit FuncletPadInst(Instruction::FuncletPadOps Op, Value *ParentPad,
-                          ArrayRef<Value *> Args, unsigned Values,
-                          const Twine &NameStr, BasicBlock *InsertAtEnd);
+                          ArrayRef<Value *> Args, AllocInfo AllocInfo,
+                          const Twine &NameStr, InsertPosition InsertBefore);
 
   void init(Value *ParentPad, ArrayRef<Value *> Args, const Twine &NameStr);
 
@@ -2331,9 +2376,9 @@ public:
   /// Provide fast operand accessors
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
-  /// getNumArgOperands - Return the number of funcletpad arguments.
+  /// arg_size - Return the number of funcletpad arguments.
   ///
-  unsigned getNumArgOperands() const { return getNumOperands() - 1; }
+  unsigned arg_size() const { return getNumOperands() - 1; }
 
   /// Convenience accessors
 
@@ -2369,7 +2414,7 @@ public:
 
 template <>
 struct OperandTraits<FuncletPadInst>
-    : public VariadicOperandTraits<FuncletPadInst, /*MINARITY=*/1> {};
+    : public VariadicOperandTraits<FuncletPadInst> {};
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(FuncletPadInst, Value)
 

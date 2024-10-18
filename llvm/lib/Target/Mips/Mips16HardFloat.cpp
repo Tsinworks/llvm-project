@@ -15,6 +15,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ModRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <string>
@@ -409,10 +410,11 @@ static bool fixupFPReturnAndCall(Function &F, Module *M,
         // functions will take place.
         //
         A = A.addFnAttribute(C, "__Mips16RetHelper");
-        A = A.addFnAttribute(C, Attribute::ReadNone);
+        A = A.addFnAttribute(
+            C, Attribute::getWithMemoryEffects(C, MemoryEffects::none()));
         A = A.addFnAttribute(C, Attribute::NoInline);
         FunctionCallee F = (M->getOrInsertFunction(Name, A, MyVoid, T));
-        CallInst::Create(F, Params, "", &I);
+        CallInst::Create(F, Params, "", I.getIterator());
       } else if (const CallInst *CI = dyn_cast<CallInst>(&I)) {
         FunctionType *FT = CI->getFunctionType();
         Function *F_ =  CI->getCalledFunction();
@@ -479,14 +481,12 @@ static void createFPFnStub(Function *F, Module *M, FPParamVariant PV,
 
 // remove the use-soft-float attribute
 static void removeUseSoftFloat(Function &F) {
-  AttrBuilder B;
   LLVM_DEBUG(errs() << "removing -use-soft-float\n");
-  B.addAttribute("use-soft-float", "false");
-  F.removeFnAttrs(B);
+  F.removeFnAttr("use-soft-float");
   if (F.hasFnAttribute("use-soft-float")) {
     LLVM_DEBUG(errs() << "still has -use-soft-float\n");
   }
-  F.addFnAttrs(B);
+  F.addFnAttr("use-soft-float", "false");
 }
 
 // This pass only makes sense when the underlying chip has floating point but

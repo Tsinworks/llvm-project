@@ -26,14 +26,10 @@ add_llvm_executable(${test_name}
   IGNORE_EXTERNALIZE_DEBUGINFO NO_INSTALL_RPATH
   CommandLineInitTest.cpp)
 
-target_link_libraries(${test_name} PRIVATE gtest)
+target_link_libraries(${test_name} PRIVATE llvm_gtest)
 
 add_dependencies(${test_suite} ${test_name})
 
 set(outdir ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR})
 set_output_directory(${test_name} BINARY_DIR ${outdir} LIBRARY_DIR ${outdir})
 
-get_target_property(test_suite_folder ${test_suite} FOLDER)
-if (test_suite_folder)
-  set_property(TARGET ${test_name} PROPERTY FOLDER "${test_suite_folder}")
-endif ()

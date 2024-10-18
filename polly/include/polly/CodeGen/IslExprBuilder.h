@@ -78,7 +78,7 @@ class ScopArrayInfo;
 ///   to use this information in our IslAstGenerator. Preliminary patches are
 ///   available, but have not been committed yet.
 ///
-class IslExprBuilder {
+class IslExprBuilder final {
 public:
   /// A map from isl_ids to llvm::Values.
   typedef llvm::MapVector<isl_id *, llvm::AssertingVH<llvm::Value>> IDToValueTy;
@@ -123,6 +123,10 @@ public:
                  ValueMapT &GlobalMap, const llvm::DataLayout &DL,
                  llvm::ScalarEvolution &SE, llvm::DominatorTree &DT,
                  llvm::LoopInfo &LI, llvm::BasicBlock *StartBlock);
+
+  /// Change the function that code is emitted into.
+  void switchGeneratedFunc(llvm::Function *GenFn, llvm::DominatorTree *GenDT,
+                           llvm::LoopInfo *GenLI, llvm::ScalarEvolution *GenSE);
 
   /// Create LLVM-IR for an isl_ast_expr[ession].
   ///
@@ -205,9 +209,14 @@ private:
 
   const llvm::DataLayout &DL;
   llvm::ScalarEvolution &SE;
-  llvm::DominatorTree &DT;
-  llvm::LoopInfo &LI;
   llvm::BasicBlock *StartBlock;
+
+  /// Relates to the region where the code is emitted into.
+  /// @{
+  llvm::DominatorTree *GenDT;
+  llvm::LoopInfo *GenLI;
+  llvm::ScalarEvolution *GenSE;
+  /// @}
 
   llvm::Value *createOp(__isl_take isl_ast_expr *Expr);
   llvm::Value *createOpUnary(__isl_take isl_ast_expr *Expr);

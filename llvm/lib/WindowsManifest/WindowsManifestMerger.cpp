@@ -14,8 +14,6 @@
 #include "llvm/Config/config.h"
 #include "llvm/Support/MemoryBuffer.h"
 
-#include <map>
-
 #if LLVM_ENABLE_LIBXML2
 #include <libxml/xmlreader.h>
 #endif
@@ -669,9 +667,8 @@ WindowsManifestMerger::WindowsManifestMergerImpl::getMergedManifest() {
     std::unique_ptr<xmlDoc, XmlDeleter> OutputDoc(
         xmlNewDoc((const unsigned char *)"1.0"));
     xmlDocSetRootElement(OutputDoc.get(), CombinedRoot);
-    assert(0 == xmlDocGetRootElement(CombinedDoc));
+    assert(nullptr == xmlDocGetRootElement(CombinedDoc));
 
-    xmlKeepBlanksDefault(0);
     xmlChar *Buff = nullptr;
     xmlDocDumpFormatMemoryEnc(OutputDoc.get(), &Buff, &BufferSize, "UTF-8", 1);
     Buffer.reset(Buff);
@@ -706,7 +703,7 @@ bool windows_manifest::isAvailable() { return false; }
 WindowsManifestMerger::WindowsManifestMerger()
     : Impl(std::make_unique<WindowsManifestMergerImpl>()) {}
 
-WindowsManifestMerger::~WindowsManifestMerger() {}
+WindowsManifestMerger::~WindowsManifestMerger() = default;
 
 Error WindowsManifestMerger::merge(MemoryBufferRef Manifest) {
   return Impl->merge(Manifest);

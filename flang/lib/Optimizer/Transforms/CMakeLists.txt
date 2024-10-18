@@ -1,27 +1,59 @@
 add_flang_library(FIRTransforms
   AbstractResult.cpp
+  AddAliasTags.cpp
   AffinePromotion.cpp
   AffineDemotion.cpp
+  AnnotateConstant.cpp
+  AssumedRankOpConversion.cpp
   CharacterConversion.cpp
+  CompilerGeneratedNames.cpp
+  ConstantArgumentGlobalisation.cpp
+  ControlFlowConverter.cpp
+  CUFAddConstructor.cpp
+  CufImplicitDeviceGlobal.cpp
+  CufOpConversion.cpp
   ArrayValueCopy.cpp
-  Inliner.cpp
   ExternalNameConversion.cpp
+  MemoryUtils.cpp
   MemoryAllocation.cpp
+  StackArrays.cpp
   MemRefDataFlowOpt.cpp
-  RewriteLoop.cpp
+  SimplifyRegionLite.cpp
+  AlgebraicSimplification.cpp
+  SimplifyIntrinsics.cpp
+  AddDebugInfo.cpp
+  PolymorphicOpConversion.cpp
+  LoopVersioning.cpp
+  StackReclaim.cpp
+  VScaleAttr.cpp
+  FunctionAttr.cpp
+  DebugTypeGenerator.cpp
 
   DEPENDS
-  FIRBuilder
+  CUFAttrs
+  CUFDialect
   FIRDialect
-  FIRSupport
   FIROptTransformsPassIncGen
+  HLFIROpsIncGen
 
   LINK_LIBS
+  CUFAttrs
+  CUFDialect
+  FIRAnalysis
   FIRBuilder
+  FIRCodeGen
   FIRDialect
-  MLIRAffineToStandard
-  MLIRLLVMIR
-  MLIROpenACC
-  MLIROpenMP
+  FIRDialectSupport
   FIRSupport
+  FortranCommon
+  HLFIRDialect
+  MLIRAffineUtils
+  MLIRFuncDialect
+  MLIRGPUDialect
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRMathTransforms
+  MLIROpenACCDialect
+  MLIROpenACCToLLVMIRTranslation
+  MLIROpenMPDialect
 )

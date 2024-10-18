@@ -7,7 +7,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "TestAsmPrinter.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/CodeGen/AsmPrinterHandler.h"
+#include "llvm/CodeGen/DebugHandlerBase.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -19,6 +22,7 @@
 
 using namespace llvm;
 using testing::_;
+using testing::DoAll;
 using testing::InSequence;
 using testing::SaveArg;
 
@@ -58,7 +62,7 @@ protected:
     MCSection *Sec =
         TestPrinter->getCtx().getELFSection(".tst", ELF::SHT_PROGBITS, 0);
     SecBeginSymbol = Sec->getBeginSymbol();
-    TestPrinter->getMS().SwitchSection(Sec);
+    TestPrinter->getMS().switchSection(Sec);
     Val->setFragment(&Sec->getDummyFragment());
 
     return true;
@@ -72,7 +76,7 @@ TEST_F(AsmPrinterEmitDwarfSymbolReferenceTest, COFF) {
   if (!init("x86_64-pc-windows", /*DwarfVersion=*/4, dwarf::DWARF32))
     GTEST_SKIP();
 
-  EXPECT_CALL(TestPrinter->getMS(), EmitCOFFSecRel32(Val, 0));
+  EXPECT_CALL(TestPrinter->getMS(), emitCOFFSecRel32(Val, 0));
   TestPrinter->getAP()->emitDwarfSymbolReference(Val, false);
 }
 
@@ -380,11 +384,58 @@ class AsmPrinterHandlerTest : public AsmPrinterFixtureBase {
   public:
     TestHandler(AsmPrinterHandlerTest &Test) : Test(Test) {}
     virtual ~TestHandler() {}
-    virtual void setSymbolSize(const MCSymbol *Sym, uint64_t Size) override {}
     virtual void beginModule(Module *M) override { Test.BeginCount++; }
     virtual void endModule() override { Test.EndCount++; }
     virtual void beginFunction(const MachineFunction *MF) override {}
     virtual void endFunction(const MachineFunction *MF) override {}
+  };
+
+protected:
+  bool init(const std::string &TripleStr, unsigned DwarfVersion,
+            dwarf::DwarfFormat DwarfFormat) {
+    if (!AsmPrinterFixtureBase::init(TripleStr, DwarfVersion, DwarfFormat))
+      return false;
+
+    auto *AP = TestPrinter->getAP();
+    AP->addAsmPrinterHandler(std::make_unique<TestHandler>(*this));
+    LLVMTargetMachine *LLVMTM = static_cast<LLVMTargetMachine *>(&AP->TM);
+    legacy::PassManager PM;
+    PM.add(new MachineModuleInfoWrapperPass(LLVMTM));
+    PM.add(TestPrinter->releaseAP()); // Takes ownership of destroying AP
+    LLVMContext Context;
+    std::unique_ptr<Module> M(new Module("TestModule", Context));
+    M->setDataLayout(LLVMTM->createDataLayout());
+    PM.run(*M);
+    // Now check that we can run it twice.
+    AP->addAsmPrinterHandler(std::make_unique<TestHandler>(*this));
+    PM.run(*M);
+    return true;
+  }
+
+  int BeginCount = 0;
+  int EndCount = 0;
+};
+
+TEST_F(AsmPrinterHandlerTest, Basic) {
+  if (!init("x86_64-pc-linux", /*DwarfVersion=*/4, dwarf::DWARF32))
+    GTEST_SKIP();
+
+  ASSERT_EQ(BeginCount, 3);
+  ASSERT_EQ(EndCount, 3);
+}
+
+class AsmPrinterDebugHandlerTest : public AsmPrinterFixtureBase {
+  class TestDebugHandler : public DebugHandlerBase {
+    AsmPrinterDebugHandlerTest &Test;
+
+  public:
+    TestDebugHandler(AsmPrinterDebugHandlerTest &Test, AsmPrinter *AP)
+        : DebugHandlerBase(AP), Test(Test) {}
+    virtual ~TestDebugHandler() {}
+    virtual void beginModule(Module *M) override { Test.BeginCount++; }
+    virtual void endModule() override { Test.EndCount++; }
+    virtual void beginFunctionImpl(const MachineFunction *MF) override {}
+    virtual void endFunctionImpl(const MachineFunction *MF) override {}
     virtual void beginInstruction(const MachineInstr *MI) override {}
     virtual void endInstruction() override {}
   };
@@ -396,9 +447,7 @@ protected:
       return false;
 
     auto *AP = TestPrinter->getAP();
-    AP->addAsmPrinterHandler(AsmPrinter::HandlerInfo(
-        std::unique_ptr<AsmPrinterHandler>(new TestHandler(*this)),
-        "TestTimerName", "TestTimerDesc", "TestGroupName", "TestGroupDesc"));
+    AP->addDebugHandler(std::make_unique<TestDebugHandler>(*this, AP));
     LLVMTargetMachine *LLVMTM = static_cast<LLVMTargetMachine *>(&AP->TM);
     legacy::PassManager PM;
     PM.add(new MachineModuleInfoWrapperPass(LLVMTM));
@@ -408,9 +457,7 @@ protected:
     M->setDataLayout(LLVMTM->createDataLayout());
     PM.run(*M);
     // Now check that we can run it twice.
-    AP->addAsmPrinterHandler(AsmPrinter::HandlerInfo(
-        std::unique_ptr<AsmPrinterHandler>(new TestHandler(*this)),
-        "TestTimerName", "TestTimerDesc", "TestGroupName", "TestGroupDesc"));
+    AP->addDebugHandler(std::make_unique<TestDebugHandler>(*this, AP));
     PM.run(*M);
     return true;
   }
@@ -419,7 +466,7 @@ protected:
   int EndCount = 0;
 };
 
-TEST_F(AsmPrinterHandlerTest, Basic) {
+TEST_F(AsmPrinterDebugHandlerTest, Basic) {
   if (!init("x86_64-pc-linux", /*DwarfVersion=*/4, dwarf::DWARF32))
     GTEST_SKIP();
 

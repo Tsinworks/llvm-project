@@ -13,7 +13,7 @@
 
 set -e
 
-projects="llvm clang compiler-rt libcxx libcxxabi libclc clang-tools-extra polly lldb lld openmp libunwind flang"
+projects="llvm bolt clang cmake compiler-rt libcxx libcxxabi libclc clang-tools-extra polly lldb lld openmp libunwind mlir flang runtimes third-party"
 
 release=""
 rc=""
@@ -84,7 +84,7 @@ export_sources() {
     # Determine the release by fetching the version from LLVM's CMakeLists.txt
     # in the specified git ref.
     if [ -n "$snapshot" ]; then
-        release=$(git -C $llvm_src_dir show $snapshot:llvm/CMakeLists.txt | grep -ioP 'set\(\s*LLVM_VERSION_(MAJOR|MINOR|PATCH)\s\K[0-9]+' | paste -sd '.')
+        release=$(git -C $llvm_src_dir show $snapshot:cmake/Modules/LLVMVersion.cmake | grep -ioP 'set\(\s*LLVM_VERSION_(MAJOR|MINOR|PATCH)\s\K[0-9]+' | paste -sd '.')
     fi
     
     tag="llvmorg-$release"
@@ -112,7 +112,7 @@ export_sources() {
     echo "$rc" > $target_dir/llvm-rc-$yyyymmdd.txt
     echo "$git_rev" > $target_dir/llvm-git-revision-$yyyymmdd.txt
     
-    git archive --prefix=llvm-project-$release$rc.src/ $tree_id . | xz >$target_dir/$(template_file llvm-project)
+    git archive --prefix=llvm-project-$release$rc.src/ $tree_id . | xz -T0 >$target_dir/$(template_file llvm-project)
     popd
 
     if [ -z "$snapshot" ]; then
@@ -131,7 +131,7 @@ export_sources() {
     for proj in $projects; do
         echo "Creating tarball for $proj ..."
         pushd $llvm_src_dir/$proj
-        git archive --prefix=$proj-$release$rc.src/ $tree_id . | xz >$target_dir/$(template_file $proj)
+        git archive --prefix=$proj-$release$rc.src/ $tree_id . | xz -T0 >$target_dir/$(template_file $proj)
         popd
     done
 }

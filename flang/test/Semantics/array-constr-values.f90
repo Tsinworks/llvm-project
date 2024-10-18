@@ -3,7 +3,7 @@
 ! C7110, C7111, C7112, C7113, C7114, C7115
 
 subroutine arrayconstructorvalues()
-  integer :: intarray(5)
+  integer :: intarray(4)
   integer(KIND=8) :: k8 = 20
 
   TYPE EMPLOYEE
@@ -29,14 +29,16 @@ subroutine arrayconstructorvalues()
   ! C7111
   !ERROR: Value in array constructor of type 'LOGICAL(4)' could not be converted to the type of the array 'INTEGER(4)'
   intarray = [integer:: .true., 2, 3, 4, 5]
-  !ERROR: Value in array constructor of type 'CHARACTER(1)' could not be converted to the type of the array 'INTEGER(4)'
+  !ERROR: Value in array constructor of type 'CHARACTER(KIND=1,LEN=22_8)' could not be converted to the type of the array 'INTEGER(4)'
   intarray = [integer:: "RAM stores information", 2, 3, 4, 5]
   !ERROR: Value in array constructor of type 'employee' could not be converted to the type of the array 'INTEGER(4)'
   intarray = [integer:: EMPLOYEE (19, "Jack"), 2, 3, 4, 5]
 
   ! C7112
+  !ERROR: Dimension 1 of left-hand side has extent 3, but right-hand side has extent 2
   !ERROR: Value in array constructor of type 'INTEGER(4)' could not be converted to the type of the array 'employee'
   emparray = (/ EMPLOYEE:: EMPLOYEE(19, "Ganesh"), EMPLOYEE(22, "Omkar"), 19 /)
+  !ERROR: Dimension 1 of left-hand side has extent 3, but right-hand side has extent 2
   !ERROR: Value in array constructor of type 'employeer' could not be converted to the type of the array 'employee'
   emparray = (/ EMPLOYEE:: EMPLOYEE(19, "Ganesh"), EMPLOYEE(22, "Ram"),EMPLOYEER("ShriniwasPvtLtd") /)
 
@@ -44,9 +46,10 @@ subroutine arrayconstructorvalues()
   !ERROR: Cannot have an unlimited polymorphic value in an array constructor
   intarray = (/ unlim_polymorphic, 2, 3, 4, 5/)
 
-  ! C7114
+  ! C7114, F'2023 C7125
   !ERROR: No intrinsic or user-defined ASSIGNMENT(=) matches operand types INTEGER(4) and TYPE(base_type)
   !ERROR: ABSTRACT derived type 'base_type' may not be used in a structure constructor
+  !ERROR: An item whose declared type is ABSTRACT may not appear in an array constructor
   !ERROR: Values in array constructor must have the same declared type when no explicit type appears
   intarray = (/ base_type(10), 2, 3, 4, 5 /)
 

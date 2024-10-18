@@ -1560,6 +1560,7 @@ TEST(MemorySanitizer, memccpy_nomatch_positive) {
   char* y = new char[5];
   strcpy(x, "abc");
   EXPECT_UMR(memccpy(y, x, 'd', 5));
+  break_optimization(y);
   delete[] x;
   delete[] y;
 }
@@ -1570,6 +1571,7 @@ TEST(MemorySanitizer, memccpy_match_positive) {
   x[0] = 'a';
   x[2] = 'b';
   EXPECT_UMR(memccpy(y, x, 'b', 5));
+  break_optimization(y);
   delete[] x;
   delete[] y;
 }
@@ -1683,6 +1685,21 @@ TEST(MemorySanitizer, stpcpy) {
   EXPECT_NOT_POISONED(y[0]);
   EXPECT_POISONED(y[1]);
   EXPECT_NOT_POISONED(y[2]);
+}
+
+TEST(MemorySanitizer, stpncpy) {
+  char *x = new char[3];
+  char *y = new char[5];
+  x[0] = 'a';
+  x[1] = *GetPoisoned<char>(1, 1);
+  x[2] = '\0';
+  char *res = stpncpy(y, x, 4);
+  ASSERT_EQ(res, y + 2);
+  EXPECT_NOT_POISONED(y[0]);
+  EXPECT_POISONED(y[1]);
+  EXPECT_NOT_POISONED(y[2]);
+  EXPECT_NOT_POISONED(y[3]);
+  EXPECT_POISONED(y[4]);
 }
 
 TEST(MemorySanitizer, strcat) {
@@ -3153,19 +3170,21 @@ static void GetPathToLoadable(char *buf, size_t sz) {
   const char *last_slash = strrchr(program_path, '/');
   ASSERT_NE(nullptr, last_slash);
   size_t dir_len = (size_t)(last_slash - program_path);
-#if defined(__x86_64__)
+#  if defined(__x86_64__)
   static const char basename[] = "libmsan_loadable.x86_64.so";
-#elif defined(__MIPSEB__) || defined(MIPSEB)
+#  elif defined(__MIPSEB__) || defined(MIPSEB)
   static const char basename[] = "libmsan_loadable.mips64.so";
-#elif defined(__mips64)
+#  elif defined(__mips64)
   static const char basename[] = "libmsan_loadable.mips64el.so";
-#elif defined(__aarch64__)
+#  elif defined(__aarch64__)
   static const char basename[] = "libmsan_loadable.aarch64.so";
-#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  elif defined(__loongarch_lp64)
+  static const char basename[] = "libmsan_loadable.loongarch64.so";
+#  elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   static const char basename[] = "libmsan_loadable.powerpc64.so";
-#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#  elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
   static const char basename[] = "libmsan_loadable.powerpc64le.so";
-#endif
+#  endif
   int res = snprintf(buf, sz, "%.*s/%s",
                      (int)dir_len, program_path, basename);
   ASSERT_GE(res, 0);
@@ -3222,7 +3241,7 @@ TEST(MemorySanitizer, dlopenFailed) {
 
 #endif // MSAN_TEST_DISABLE_DLOPEN
 
-#if !defined(__FreeBSD__) && !defined(__NetBSD__)
+#if !defined(__NetBSD__)
 TEST(MemorySanitizer, sched_getaffinity) {
   cpu_set_t mask;
   if (sched_getaffinity(getpid(), sizeof(mask), &mask) == 0)
@@ -4423,7 +4442,8 @@ TEST(MemorySanitizerOrigins, EQ) {
   if (!TrackingOrigins()) return;
   EXPECT_POISONED_O(*GetPoisonedO<S4>(0, __LINE__) <= 11, __LINE__);
   EXPECT_POISONED_O(*GetPoisonedO<S4>(0, __LINE__) == 11, __LINE__);
-  EXPECT_POISONED_O(*GetPoisonedO<float>(0, __LINE__) == 1.1, __LINE__);
+  EXPECT_POISONED_O(*GetPoisonedO<float>(0, __LINE__) == 1.1f, __LINE__);
+  EXPECT_POISONED_O(*GetPoisonedO<double>(0, __LINE__) == 1.1, __LINE__);
 }
 
 TEST(MemorySanitizerOrigins, DIV) {
@@ -4861,4 +4881,27 @@ TEST(MemorySanitizer, throw_catch) {
     // pass
   }
 }
+
+#if defined(__linux__)
+TEST(MemorySanitizer, timer_create) {
+  timer_t timer;
+  EXPECT_POISONED(timer);
+  int res = timer_create(CLOCK_REALTIME, nullptr, &timer);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(timer);
+
+  // Make sure the timer is usable.
+  struct itimerspec cur_value {};
+  cur_value.it_value.tv_sec = 1;
+  EXPECT_EQ(0, timer_settime(timer, 0, &cur_value, nullptr));
+
+  timer_t timer2;
+  EXPECT_POISONED(timer2);
+  // Use an invalid clock_id to make timer_create fail.
+  res = timer_create(INT_MAX, nullptr, &timer2);
+  ASSERT_EQ(-1, res);
+  EXPECT_POISONED(timer2);
+  timer_delete(timer);
+}
+#endif
 } // namespace

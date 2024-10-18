@@ -14,8 +14,15 @@
 //
 // template<class Container, class Allocator>
 //   queue(Container, Allocator) -> queue<typename Container::value_type, Container>;
+//
+// template<ranges::input_range R>
+//   queue(from_range_t, R&&) -> queue<ranges::range_value_t<R>>; // since C++23
+//
+// template<ranges::input_range R, class Allocator>
+//     queue(from_range_t, R&&, Allocator)
+//       -> queue<ranges::range_value_t<R>, deque<ranges::range_value_t<R>, Allocator>>; // since C++23
 
-
+#include <array>
 #include <queue>
 #include <list>
 #include <iterator>
@@ -133,27 +140,36 @@ int main(int, char**)
         }
     }
 
-    // Deduction guides should be SFINAE'd away when given:
-    // - a "bad" allocator (that is, a type not qualifying as an allocator);
-    // - an allocator instead of a container;
-    // - an allocator and a container that uses a different allocator.
+#if TEST_STD_VER >= 23
     {
-        using Cont = std::list<int>;
-        using Alloc = std::allocator<int>;
-        using DiffAlloc = test_allocator<int>;
-
-        struct BadAlloc {};
-        using AllocAsCont = Alloc;
-
-        // (cont, alloc)
-        //
-        // Cannot deduce from (ALLOC_as_cont, alloc)
-        static_assert(SFINAEs_away<std::queue, AllocAsCont, BadAlloc>);
-        // Cannot deduce from (cont, BAD_alloc)
-        static_assert(SFINAEs_away<std::queue, Cont, BadAlloc>);
-        // Cannot deduce from (cont, DIFFERENT_alloc)
-        static_assert(SFINAEs_away<std::queue, Cont, DiffAlloc>);
+        typedef short T;
+        typedef test_allocator<T> Alloc;
+        std::list<T> a;
+        {
+        std::queue q(a.begin(), a.end());
+        static_assert(std::is_same_v<decltype(q), std::queue<T>>);
+        }
+        {
+        std::queue q(a.begin(), a.end(), Alloc());
+        static_assert(std::is_same_v<decltype(q), std::queue<T, std::deque<T, Alloc>>>);
+        }
     }
+
+    {
+      {
+        std::queue c(std::from_range, std::array<int, 0>());
+        static_assert(std::is_same_v<decltype(c), std::queue<int>>);
+      }
+
+      {
+        using Alloc = test_allocator<int>;
+        std::queue c(std::from_range, std::array<int, 0>(), Alloc());
+        static_assert(std::is_same_v<decltype(c), std::queue<int, std::deque<int, Alloc>>>);
+      }
+    }
+#endif
+
+    ContainerAdaptorDeductionGuidesSfinaeAway<std::queue, std::queue<int>>();
 
     return 0;
 }

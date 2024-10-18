@@ -23,13 +23,13 @@
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/ValueTypes.h"
+#include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm/Support/MachineValueType.h"
+#include <optional>
 #include <utility>
 
 namespace llvm {
@@ -41,6 +41,7 @@ class FunctionLoweringInfo;
 class GlobalValue;
 class InstrItineraryData;
 class Instruction;
+class IRBuilderBase;
 class MachineBasicBlock;
 class MachineInstr;
 class SelectionDAG;
@@ -73,9 +74,9 @@ class VectorType;
     BRCOND,      // Conditional branch.
     BR_JT,       // Jumptable branch.
     BR2_JT,      // Jumptable branch (2 level - jumptable entry is a jump).
-    RET_FLAG,    // Return with a flag operand.
-    SERET_FLAG,  // CMSE Entry function return with a flag operand.
-    INTRET_FLAG, // Interrupt return with an LR-offset and a flag operand.
+    RET_GLUE,    // Return with a flag operand.
+    SERET_GLUE,  // CMSE Entry function return with a flag operand.
+    INTRET_GLUE, // Interrupt return with an LR-offset and a flag operand.
 
     PIC_ADD, // Add with a PC operand and a PIC label.
 
@@ -94,15 +95,14 @@ class VectorType;
     FMSTAT,   // ARM fmstat instruction.
 
     CMOV, // ARM conditional move instructions.
-    SUBS, // Flag-setting subtraction.
 
     SSAT, // Signed saturation
     USAT, // Unsigned saturation
 
     BCC_i64,
 
-    SRL_FLAG, // V,Flag = srl_flag X -> srl X, 1 + save carry out.
-    SRA_FLAG, // V,Flag = sra_flag X -> sra X, 1 + save carry out.
+    SRL_GLUE, // V,Flag = srl_flag X -> srl X, 1 + save carry out.
+    SRA_GLUE, // V,Flag = sra_flag X -> sra X, 1 + save carry out.
     RRX,      // V = RRX X, Flag     -> srl X, 1 + shift in carry flag.
 
     ADDC, // Add with carry
@@ -243,8 +243,7 @@ class VectorType;
     VADDLVAps, // Same as VADDLVp[su] but with a v4i1 predicate mask
     VADDLVApu,
     VMLAVs, // sign- or zero-extend the elements of two vectors to i32, multiply
-            // them
-    VMLAVu, //   and add the results together, returning an i32 of their sum
+    VMLAVu, //   them and add the results together, returning an i32 of the sum
     VMLAVps, // Same as VMLAV[su] with a v4i1 predicate mask
     VMLAVpu,
     VMLALVs,  // Same as VMLAV but with i64, returning the low and
@@ -375,6 +374,14 @@ class VectorType;
 
   // Bit position of rounding mode bits in FPSCR.
   const unsigned RoundingBitsPos = 22;
+
+  // Bits of floating-point status. These are NZCV flags, QC bit and cumulative
+  // FP exception bits.
+  const unsigned FPStatusBits = 0xf800009f;
+
+  // Some bits in the FPSCR are not yet defined.  They must be preserved when
+  // modifying the contents.
+  const unsigned FPReservedBits = 0x00006060;
   } // namespace ARM
 
   /// Define some predicates that are used for node matching.
@@ -445,7 +452,7 @@ class VectorType;
     bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AddrSpace,
                                         Align Alignment,
                                         MachineMemOperand::Flags Flags,
-                                        bool *Fast) const override;
+                                        unsigned *Fast) const override;
 
     EVT getOptimalMemOpType(const MemOp &Op,
                             const AttributeList &FuncAttributes) const override;
@@ -453,8 +460,6 @@ class VectorType;
     bool isTruncateFree(Type *SrcTy, Type *DstTy) const override;
     bool isTruncateFree(EVT SrcVT, EVT DstVT) const override;
     bool isZExtFree(SDValue Val, EVT VT2) const override;
-    bool shouldSinkOperands(Instruction *I,
-                            SmallVectorImpl<Use *> &Ops) const override;
     Type* shouldConvertSplatType(ShuffleVectorInst* SVI) const override;
 
     bool isFNegFree(EVT VT) const override;
@@ -469,14 +474,6 @@ class VectorType;
     bool isLegalAddressingMode(const DataLayout &DL, const AddrMode &AM,
                                Type *Ty, unsigned AS,
                                Instruction *I = nullptr) const override;
-
-    /// getScalingFactorCost - Return the cost of the scaling used in
-    /// addressing mode represented by AM.
-    /// If the AM is supported, the return value must be >= 0.
-    /// If the AM is not supported, the return value must be negative.
-    InstructionCost getScalingFactorCost(const DataLayout &DL,
-                                         const AddrMode &AM, Type *Ty,
-                                         unsigned AS) const override;
 
     bool isLegalT2ScaledAddressingMode(const AddrMode &AM, EVT VT) const;
 
@@ -538,33 +535,33 @@ class VectorType;
     /// vector.  If it is invalid, don't add anything to Ops. If hasMemory is
     /// true it means one of the asm constraint of the inline asm instruction
     /// being processed is 'm'.
-    void LowerAsmOperandForConstraint(SDValue Op, std::string &Constraint,
+    void LowerAsmOperandForConstraint(SDValue Op, StringRef Constraint,
                                       std::vector<SDValue> &Ops,
                                       SelectionDAG &DAG) const override;
 
-    unsigned
+    InlineAsm::ConstraintCode
     getInlineAsmMemConstraint(StringRef ConstraintCode) const override {
       if (ConstraintCode == "Q")
-        return InlineAsm::Constraint_Q;
-      else if (ConstraintCode.size() == 2) {
+        return InlineAsm::ConstraintCode::Q;
+      if (ConstraintCode.size() == 2) {
         if (ConstraintCode[0] == 'U') {
           switch(ConstraintCode[1]) {
           default:
             break;
           case 'm':
-            return InlineAsm::Constraint_Um;
+            return InlineAsm::ConstraintCode::Um;
           case 'n':
-            return InlineAsm::Constraint_Un;
+            return InlineAsm::ConstraintCode::Un;
           case 'q':
-            return InlineAsm::Constraint_Uq;
+            return InlineAsm::ConstraintCode::Uq;
           case 's':
-            return InlineAsm::Constraint_Us;
+            return InlineAsm::ConstraintCode::Us;
           case 't':
-            return InlineAsm::Constraint_Ut;
+            return InlineAsm::ConstraintCode::Ut;
           case 'v':
-            return InlineAsm::Constraint_Uv;
+            return InlineAsm::ConstraintCode::Uv;
           case 'y':
-            return InlineAsm::Constraint_Uy;
+            return InlineAsm::ConstraintCode::Uy;
           }
         }
       }
@@ -581,7 +578,7 @@ class VectorType;
     getRegClassFor(MVT VT, bool isDivergent = false) const override;
 
     bool shouldAlignPointerArgs(CallInst *CI, unsigned &MinSize,
-                                unsigned &PrefAlign) const override;
+                                Align &PrefAlign) const override;
 
     /// createFastISel - This method returns a target specific FastISel object,
     /// or null if the target does not support "fast" ISel.
@@ -591,6 +588,8 @@ class VectorType;
     Sched::Preference getSchedulingPreference(SDNode *N) const override;
 
     bool preferZeroCompareBranch() const override { return true; }
+
+    bool isMaskAndCmp0FoldingBeneficial(const Instruction &AndI) const override;
 
     bool
     isShuffleMaskLegal(ArrayRef<int> M, EVT VT) const override;
@@ -621,6 +620,10 @@ class VectorType;
                               bool MathUsed) const override {
       // Using overflow ops for overflow checks only should beneficial on ARM.
       return TargetLowering::shouldFormOverflowOp(Opcode, VT, true);
+    }
+
+    bool shouldReassociateReduction(unsigned Opc, EVT VT) const override {
+      return Opc != ISD::VECREDUCE_ADD;
     }
 
     /// Returns true if an argument of type Ty needs to be passed in a
@@ -665,13 +668,14 @@ class VectorType;
     bool shouldInsertFencesForAtomic(const Instruction *I) const override;
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicLoadInIR(LoadInst *LI) const override;
-    bool shouldExpandAtomicStoreInIR(StoreInst *SI) const override;
+    TargetLoweringBase::AtomicExpansionKind
+    shouldExpandAtomicStoreInIR(StoreInst *SI) const override;
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicRMWInIR(AtomicRMWInst *AI) const override;
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicCmpXchgInIR(AtomicCmpXchgInst *AI) const override;
 
-    bool useLoadStackGuardNode() const override;
+    bool useLoadStackGuardNode(const Module &M) const override;
 
     void insertSSPDeclarations(Module &M) const override;
     Value *getSDagStackGuard(const Module &M) const override;
@@ -686,8 +690,8 @@ class VectorType;
       return (MemVT.getSizeInBits() <= 32);
     }
 
-    bool isCheapToSpeculateCttz() const override;
-    bool isCheapToSpeculateCtlz() const override;
+    bool isCheapToSpeculateCttz(Type *Ty) const override;
+    bool isCheapToSpeculateCtlz(Type *Ty) const override;
 
     bool convertSetCCLogicToBitwiseLogic(EVT VT) const override {
       return VT.isScalarInteger();
@@ -701,7 +705,9 @@ class VectorType;
       return HasStandaloneRem;
     }
 
-    bool shouldExpandShift(SelectionDAG &DAG, SDNode *N) const override;
+    ShiftLegalizationStrategy
+    preferredShiftLegalizationStrategy(SelectionDAG &DAG, SDNode *N,
+                                       unsigned ExpansionFactor) const override;
 
     CCAssignFn *CCAssignFnForCall(CallingConv::ID CC, bool isVarArg) const;
     CCAssignFn *CCAssignFnForReturn(CallingConv::ID CC, bool isVarArg) const;
@@ -713,8 +719,8 @@ class VectorType;
                                       Align Alignment,
                                       const DataLayout &DL) const;
 
-    bool isMulAddWithConstProfitable(const SDValue &AddNode,
-                                     const SDValue &ConstNode) const override;
+    bool isMulAddWithConstProfitable(SDValue AddNode,
+                                     SDValue ConstNode) const override;
 
     bool alignLoopsWithOptSize() const override;
 
@@ -732,12 +738,30 @@ class VectorType;
     bool isDesirableToCommuteWithShift(const SDNode *N,
                                        CombineLevel Level) const override;
 
+    bool isDesirableToCommuteXorWithShift(const SDNode *N) const override;
+
     bool shouldFoldConstantShiftPairToMask(const SDNode *N,
                                            CombineLevel Level) const override;
+
+    bool shouldFoldSelectWithIdentityConstant(unsigned BinOpcode,
+                                              EVT VT) const override;
 
     bool preferIncOfAddToSubOfNot(EVT VT) const override;
 
     bool shouldConvertFpToSat(unsigned Op, EVT FPVT, EVT VT) const override;
+
+    bool isComplexDeinterleavingSupported() const override;
+    bool isComplexDeinterleavingOperationSupported(
+        ComplexDeinterleavingOperation Operation, Type *Ty) const override;
+
+    Value *createComplexDeinterleavingIR(
+        IRBuilderBase &B, ComplexDeinterleavingOperation OperationType,
+        ComplexDeinterleavingRotation Rotation, Value *InputA, Value *InputB,
+        Value *Accumulator = nullptr) const override;
+
+    bool softPromoteHalfType() const override { return true; }
+
+    bool useFPRegsForHalfType() const override { return true; }
 
   protected:
     std::pair<const TargetRegisterClass *, uint8_t>
@@ -752,9 +776,6 @@ class VectorType;
     const TargetRegisterInfo *RegInfo;
 
     const InstrItineraryData *Itins;
-
-    /// ARMPCLabelIndex - Keep track of the number of ARM PC labels created.
-    unsigned ARMPCLabelIndex;
 
     // TODO: remove this, and have shouldInsertFencesForAtomic do the proper
     // check.
@@ -809,7 +830,6 @@ class VectorType;
                                  TLSModel::Model model) const;
     SDValue LowerGlobalTLSAddressDarwin(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalTLSAddressWindows(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerGLOBAL_OFFSET_TABLE(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBR_JT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSignedALUO(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUnsignedALUO(SDValue Op, SelectionDAG &DAG) const;
@@ -822,8 +842,10 @@ class VectorType;
     SDValue LowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerShiftLeftParts(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerFLT_ROUNDS_(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerGET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerSET_FPMODE(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerRESET_FPMODE(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerConstantFP(SDValue Op, SelectionDAG &DAG,
                             const ARMSubtarget *ST) const;
     SDValue LowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG,
@@ -845,8 +867,7 @@ class VectorType;
     SDValue LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFSETCC(SDValue Op, SelectionDAG &DAG) const;
-    void lowerABS(SDNode *N, SmallVectorImpl<SDValue> &Results,
-                  SelectionDAG &DAG) const;
+    SDValue LowerSPONENTRY(SDValue Op, SelectionDAG &DAG) const;
     void LowerLOAD(SDNode *N, SmallVectorImpl<SDValue> &Results,
                    SelectionDAG &DAG) const;
 
@@ -866,12 +887,12 @@ class VectorType;
 
     SDValue ReconstructShuffle(SDValue Op, SelectionDAG &DAG) const;
 
-    SDValue LowerCallResult(SDValue Chain, SDValue InFlag,
+    SDValue LowerCallResult(SDValue Chain, SDValue InGlue,
                             CallingConv::ID CallConv, bool isVarArg,
                             const SmallVectorImpl<ISD::InputArg> &Ins,
                             const SDLoc &dl, SelectionDAG &DAG,
                             SmallVectorImpl<SDValue> &InVals, bool isThisReturn,
-                            SDValue ThisVal) const;
+                            SDValue ThisVal, bool isCmseNSCall) const;
 
     bool supportSplitCSR(MachineFunction *MF) const override {
       return MF->getFunction().getCallingConv() == CallingConv::CXX_FAST_TLS &&
@@ -883,16 +904,15 @@ class VectorType;
       MachineBasicBlock *Entry,
       const SmallVectorImpl<MachineBasicBlock *> &Exits) const override;
 
-    bool
-    splitValueIntoRegisterParts(SelectionDAG &DAG, const SDLoc &DL, SDValue Val,
-                                SDValue *Parts, unsigned NumParts, MVT PartVT,
-                                Optional<CallingConv::ID> CC) const override;
+    bool splitValueIntoRegisterParts(
+        SelectionDAG & DAG, const SDLoc &DL, SDValue Val, SDValue *Parts,
+        unsigned NumParts, MVT PartVT, std::optional<CallingConv::ID> CC)
+        const override;
 
-    SDValue
-    joinRegisterPartsIntoValue(SelectionDAG &DAG, const SDLoc &DL,
-                               const SDValue *Parts, unsigned NumParts,
-                               MVT PartVT, EVT ValueVT,
-                               Optional<CallingConv::ID> CC) const override;
+    SDValue joinRegisterPartsIntoValue(
+        SelectionDAG & DAG, const SDLoc &DL, const SDValue *Parts,
+        unsigned NumParts, MVT PartVT, EVT ValueVT,
+        std::optional<CallingConv::ID> CC) const override;
 
     SDValue
     LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
@@ -920,12 +940,8 @@ class VectorType;
     /// for tail call optimization. Targets which want to do tail call
     /// optimization should implement this function.
     bool IsEligibleForTailCallOptimization(
-        SDValue Callee, CallingConv::ID CalleeCC, bool isVarArg,
-        bool isCalleeStructRet, bool isCallerStructRet,
-        const SmallVectorImpl<ISD::OutputArg> &Outs,
-        const SmallVectorImpl<SDValue> &OutVals,
-        const SmallVectorImpl<ISD::InputArg> &Ins, SelectionDAG &DAG,
-        const bool isIndirect) const;
+        TargetLowering::CallLoweringInfo &CLI, CCState &CCInfo,
+        SmallVectorImpl<CCValAssign> &ArgLocs, const bool isIndirect) const;
 
     bool CanLowerReturn(CallingConv::ID CallConv,
                         MachineFunction &MF, bool isVarArg,
@@ -960,8 +976,6 @@ class VectorType;
                                 MachineBasicBlock *DispatchBB, int FI) const;
 
     void EmitSjLjDispatchBlock(MachineInstr &MI, MachineBasicBlock *MBB) const;
-
-    bool RemapAddSubWithFlags(MachineInstr &MI, MachineBasicBlock *BB) const;
 
     MachineBasicBlock *EmitStructByval(MachineInstr &MI,
                                        MachineBasicBlock *MBB) const;

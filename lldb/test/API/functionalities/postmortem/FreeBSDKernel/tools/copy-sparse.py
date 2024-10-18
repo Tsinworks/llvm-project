@@ -7,10 +7,10 @@ import sys
 
 def main():
     argp = argparse.ArgumentParser()
-    argp.add_argument('infile', type=argparse.FileType('rb'),
-                      help='Input vmcore file')
-    argp.add_argument('outfile', type=argparse.FileType('wb'),
-                      help='Output vmcore file')
+    argp.add_argument("infile", type=argparse.FileType("rb"), help="Input vmcore file")
+    argp.add_argument(
+        "outfile", type=argparse.FileType("wb"), help="Output vmcore file"
+    )
     args = argp.parse_args()
 
     inf = args.infile
@@ -23,6 +23,8 @@ def main():
 
     for l in sys.stdin:
         m = line_re.match(l)
+        if m is None:
+            continue
         offset, size = [int(x) for x in m.groups()]
 
         inf.seek(offset)

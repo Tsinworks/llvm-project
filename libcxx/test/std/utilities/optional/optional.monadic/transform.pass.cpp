@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17, c++20
+
 // <optional>
 
 // template<class F> constexpr auto transform(F&&) &;
@@ -202,4 +203,5 @@ constexpr bool test() {
 int main(int, char**) {
   test();
   static_assert(test());
+  return 0;
 }

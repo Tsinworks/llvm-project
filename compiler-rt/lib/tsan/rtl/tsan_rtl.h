@@ -34,7 +34,6 @@
 #include "sanitizer_common/sanitizer_suppressions.h"
 #include "sanitizer_common/sanitizer_thread_registry.h"
 #include "sanitizer_common/sanitizer_vector.h"
-#include "tsan_clock.h"
 #include "tsan_defs.h"
 #include "tsan_flags.h"
 #include "tsan_ignoreset.h"
@@ -57,7 +56,8 @@ namespace __tsan {
 
 #if !SANITIZER_GO
 struct MapUnmapCallback;
-#if defined(__mips64) || defined(__aarch64__) || defined(__powerpc__)
+#  if defined(__mips64) || defined(__aarch64__) || defined(__loongarch__) || \
+      defined(__powerpc__) || SANITIZER_RISCV64
 
 struct AP32 {
   static const uptr kSpaceBeg = 0;
@@ -136,7 +136,7 @@ struct TidEpoch {
   Epoch epoch;
 };
 
-struct TidSlot {
+struct alignas(SANITIZER_CACHE_LINE_SIZE) TidSlot {
   Mutex mtx;
   Sid sid;
   atomic_uint32_t raw_epoch;
@@ -153,10 +153,10 @@ struct TidSlot {
   }
 
   TidSlot();
-} ALIGNED(SANITIZER_CACHE_LINE_SIZE);
+};
 
 // This struct is stored in TLS.
-struct ThreadState {
+struct alignas(SANITIZER_CACHE_LINE_SIZE) ThreadState {
   FastState fast_state;
   int ignore_sync;
 #if !SANITIZER_GO
@@ -192,6 +192,7 @@ struct ThreadState {
 #if !SANITIZER_GO
   Vector<JmpBuf> jmp_bufs;
   int in_symbolizer;
+  atomic_uintptr_t in_blocking_func;
   bool in_ignored_lib;
   bool is_inited;
 #endif
@@ -219,7 +220,7 @@ struct ThreadState {
 #endif
 
   atomic_uintptr_t in_signal_handler;
-  ThreadSignalContext *signal_ctx;
+  atomic_uintptr_t signal_ctx;
 
 #if !SANITIZER_GO
   StackID last_sleep_stack_id;
@@ -233,10 +234,10 @@ struct ThreadState {
   const ReportDesc *current_report;
 
   explicit ThreadState(Tid tid);
-} ALIGNED(SANITIZER_CACHE_LINE_SIZE);
+};
 
 #if !SANITIZER_GO
-#if SANITIZER_MAC || SANITIZER_ANDROID
+#if SANITIZER_APPLE || SANITIZER_ANDROID
 ThreadState *cur_thread();
 void set_cur_thread(ThreadState *thr);
 void cur_thread_finalize();
@@ -257,7 +258,7 @@ inline void set_cur_thread(ThreadState *thr) {
   reinterpret_cast<ThreadState *>(cur_thread_placeholder)->current = thr;
 }
 inline void cur_thread_finalize() { }
-#  endif  // SANITIZER_MAC || SANITIZER_ANDROID
+#  endif  // SANITIZER_APPLE || SANITIZER_ANDROID
 #endif  // SANITIZER_GO
 
 class ThreadContext final : public ThreadContextBase {
@@ -315,15 +316,47 @@ struct Context {
 
   ThreadRegistry thread_registry;
 
+  // This is used to prevent a very unlikely but very pathological behavior.
+  // Since memory access handling is not synchronized with DoReset,
+  // a thread running concurrently with DoReset can leave a bogus shadow value
+  // that will be later falsely detected as a race. For such false races
+  // RestoreStack will return false and we will not report it.
+  // However, consider that a thread leaves a whole lot of such bogus values
+  // and these values are later read by a whole lot of threads.
+  // This will cause massive amounts of ReportRace calls and lots of
+  // serialization. In very pathological cases the resulting slowdown
+  // can be >100x. This is very unlikely, but it was presumably observed
+  // in practice: https://github.com/google/sanitizers/issues/1552
+  // If this happens, previous access sid+epoch will be the same for all of
+  // these false races b/c if the thread will try to increment epoch, it will
+  // notice that DoReset has happened and will stop producing bogus shadow
+  // values. So, last_spurious_race is used to remember the last sid+epoch
+  // for which RestoreStack returned false. Then it is used to filter out
+  // races with the same sid+epoch very early and quickly.
+  // It is of course possible that multiple threads left multiple bogus shadow
+  // values and all of them are read by lots of threads at the same time.
+  // In such case last_spurious_race will only be able to deduplicate a few
+  // races from one thread, then few from another and so on. An alternative
+  // would be to hold an array of such sid+epoch, but we consider such scenario
+  // as even less likely.
+  // Note: this can lead to some rare false negatives as well:
+  // 1. When a legit access with the same sid+epoch participates in a race
+  // as the "previous" memory access, it will be wrongly filtered out.
+  // 2. When RestoreStack returns false for a legit memory access because it
+  // was already evicted from the thread trace, we will still remember it in
+  // last_spurious_race. Then if there is another racing memory access from
+  // the same thread that happened in the same epoch, but was stored in the
+  // next thread trace part (which is still preserved in the thread trace),
+  // we will also wrongly filter it out while RestoreStack would actually
+  // succeed for that second memory access.
+  RawShadow last_spurious_race;
+
   Mutex racy_mtx;
   Vector<RacyStacks> racy_stacks;
-  Vector<RacyAddress> racy_addresses;
   // Number of fired suppressions may be large enough.
   Mutex fired_suppressions_mtx;
   InternalMmapVector<FiredSuppression> fired_suppressions;
   DDetector *dd;
-
-  ClockAlloc clock_alloc;
 
   Flags flags;
   fd_t memprof_fd;
@@ -335,12 +368,16 @@ struct Context {
   Mutex slot_mtx;
   uptr global_epoch;  // guarded by slot_mtx and by all slot mutexes
   bool resetting;     // global reset is in progress
-  IList<TidSlot, &TidSlot::node> slot_queue GUARDED_BY(slot_mtx);
+  IList<TidSlot, &TidSlot::node> slot_queue SANITIZER_GUARDED_BY(slot_mtx);
   IList<TraceHeader, &TraceHeader::global, TracePart> trace_part_recycle
-      GUARDED_BY(slot_mtx);
-  uptr trace_part_total_allocated GUARDED_BY(slot_mtx);
-  uptr trace_part_recycle_finished GUARDED_BY(slot_mtx);
-  uptr trace_part_finished_excess GUARDED_BY(slot_mtx);
+      SANITIZER_GUARDED_BY(slot_mtx);
+  uptr trace_part_total_allocated SANITIZER_GUARDED_BY(slot_mtx);
+  uptr trace_part_recycle_finished SANITIZER_GUARDED_BY(slot_mtx);
+  uptr trace_part_finished_excess SANITIZER_GUARDED_BY(slot_mtx);
+#if SANITIZER_GO
+  uptr mapped_shadow_begin;
+  uptr mapped_shadow_end;
+#endif
 };
 
 extern Context *ctx;  // The one and the only global runtime context.
@@ -379,6 +416,7 @@ class ScopedReportBase {
   void AddLocation(uptr addr, uptr size);
   void AddSleep(StackID stack_id);
   void SetCount(int count);
+  void SetSigNum(int sig);
 
   const ReportDesc *GetReport() const;
 
@@ -446,6 +484,7 @@ void MapThreadTrace(uptr addr, uptr size, const char *name);
 void DontNeedShadowFor(uptr addr, uptr size);
 void UnmapShadow(ThreadState *thr, uptr addr, uptr size);
 void InitializeShadowMemory();
+void DontDumpShadow(uptr addr, uptr size);
 void InitializeInterceptors();
 void InitializeLibIgnore();
 void InitializeDynamicAnnotations();
@@ -563,37 +602,16 @@ void ReleaseStore(ThreadState *thr, uptr pc, uptr addr);
 void AfterSleep(ThreadState *thr, uptr pc);
 void IncrementEpoch(ThreadState *thr);
 
-// The hacky call uses custom calling convention and an assembly thunk.
-// It is considerably faster that a normal call for the caller
-// if it is not executed (it is intended for slow paths from hot functions).
-// The trick is that the call preserves all registers and the compiler
-// does not treat it as a call.
-// If it does not work for you, use normal call.
-#if !SANITIZER_DEBUG && defined(__x86_64__) && !SANITIZER_MAC
-// The caller may not create the stack frame for itself at all,
-// so we create a reserve stack frame for it (1024b must be enough).
-#define HACKY_CALL(f) \
-  __asm__ __volatile__("sub $1024, %%rsp;" \
-                       CFI_INL_ADJUST_CFA_OFFSET(1024) \
-                       ".hidden " #f "_thunk;" \
-                       "call " #f "_thunk;" \
-                       "add $1024, %%rsp;" \
-                       CFI_INL_ADJUST_CFA_OFFSET(-1024) \
-                       ::: "memory", "cc");
-#else
-#define HACKY_CALL(f) f()
-#endif
-
 #if !SANITIZER_GO
 uptr ALWAYS_INLINE HeapEnd() {
   return HeapMemEnd() + PrimaryAllocator::AdditionalSize();
 }
 #endif
 
-void SlotAttachAndLock(ThreadState *thr) ACQUIRE(thr->slot->mtx);
+void SlotAttachAndLock(ThreadState *thr) SANITIZER_ACQUIRE(thr->slot->mtx);
 void SlotDetach(ThreadState *thr);
-void SlotLock(ThreadState *thr) ACQUIRE(thr->slot->mtx);
-void SlotUnlock(ThreadState *thr) RELEASE(thr->slot->mtx);
+void SlotLock(ThreadState *thr) SANITIZER_ACQUIRE(thr->slot->mtx);
+void SlotUnlock(ThreadState *thr) SANITIZER_RELEASE(thr->slot->mtx);
 void DoReset(ThreadState *thr, uptr epoch);
 void FlushShadowMemory();
 
@@ -612,6 +630,13 @@ class SlotLocker {
   ALWAYS_INLINE
   SlotLocker(ThreadState *thr, bool recursive = false)
       : thr_(thr), locked_(recursive ? thr->slot_locked : false) {
+#if !SANITIZER_GO
+    // We are in trouble if we are here with in_blocking_func set.
+    // If in_blocking_func is set, all signals will be delivered synchronously,
+    // which means we can't lock slots since the signal handler will try
+    // to lock it recursively and deadlock.
+    DCHECK(!atomic_load(&thr->in_blocking_func, memory_order_relaxed));
+#endif
     if (!locked_)
       SlotLock(thr_);
   }
@@ -655,8 +680,9 @@ ALWAYS_INLINE
 void LazyInitialize(ThreadState *thr) {
   // If we can use .preinit_array, assume that __tsan_init
   // called from .preinit_array initializes runtime before
-  // any instrumented code.
-#if !SANITIZER_CAN_USE_PREINIT_ARRAY
+  // any instrumented code except when tsan is used as a 
+  // shared library.
+#if (!SANITIZER_CAN_USE_PREINIT_ARRAY || defined(SANITIZER_SHARED))
   if (UNLIKELY(!is_initialized))
     Initialize(thr);
 #endif

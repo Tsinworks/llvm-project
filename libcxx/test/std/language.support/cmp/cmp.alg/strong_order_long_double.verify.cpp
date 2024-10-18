@@ -7,11 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17
-// UNSUPPORTED: libcpp-no-concepts
-
-// The following platforms have sizeof(long double) == sizeof(double), so this test doesn't apply to them.
-// UNSUPPORTED: target={{arm64|armv8|armv7|armv7m|powerpc|powerpc64}}-{{.+}}
-// UNSUPPORTED: target=x86_64-pc-windows-{{.+}}
 
 // <compare>
 
@@ -27,5 +22,9 @@
 
 void f() {
     long double ld = 3.14;
+#ifdef TEST_LONG_DOUBLE_IS_DOUBLE
+    (void)ld; // expected-no-diagnostics
+#else
     (void)std::strong_order(ld, ld);  // expected-error@*:* {{std::strong_order is unimplemented for this floating-point type}}
+#endif
 }

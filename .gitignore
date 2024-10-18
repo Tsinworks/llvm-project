@@ -13,6 +13,8 @@
 *~
 # Merge files created by git.
 *.orig
+# Reject files created by patch.
+*.rej
 # Byte compiled python modules.
 *.pyc
 # vim swap files
@@ -49,6 +51,7 @@ autoconf/autom4te.cache
 /CMakeSettings.json
 # CLion project configuration
 /.idea
+/cmake-build*
 
 #==============================================================================#
 # Directories to ignore (do not add trailing '/'s, they skip symlinks).

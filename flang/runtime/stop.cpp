@@ -26,21 +26,31 @@ static void DescribeIEEESignaledExceptions() {
 #endif
   if (excepts) {
     std::fputs("IEEE arithmetic exceptions signaled:", stderr);
+#ifdef FE_DIVBYZERO
     if (excepts & FE_DIVBYZERO) {
       std::fputs(" DIVBYZERO", stderr);
     }
+#endif
+#ifdef FE_INEXACT
     if (excepts & FE_INEXACT) {
       std::fputs(" INEXACT", stderr);
     }
+#endif
+#ifdef FE_INVALID
     if (excepts & FE_INVALID) {
       std::fputs(" INVALID", stderr);
     }
+#endif
+#ifdef FE_OVERFLOW
     if (excepts & FE_OVERFLOW) {
       std::fputs(" OVERFLOW", stderr);
     }
+#endif
+#ifdef FE_UNDERFLOW
     if (excepts & FE_UNDERFLOW) {
       std::fputs(" UNDERFLOW", stderr);
     }
+#endif
     std::fputc('\n', stderr);
   }
 }
@@ -142,5 +152,13 @@ void RTNAME(PauseStatementText)(const char *code, std::size_t length) {
   std::exit(status);
 }
 
-[[noreturn]] void RTNAME(Abort)() { std::abort(); }
+[[noreturn]] void RTNAME(Abort)() {
+  // TODO: Add backtrace call, unless with `-fno-backtrace`.
+  std::abort();
+}
+
+[[noreturn]] void RTNAME(ReportFatalUserError)(
+    const char *message, const char *source, int line) {
+  Fortran::runtime::Terminator{source, line}.Crash(message);
+}
 }

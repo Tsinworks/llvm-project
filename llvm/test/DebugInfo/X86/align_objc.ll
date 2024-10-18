@@ -16,14 +16,7 @@
 ; }
 
 ; CHECK: DW_TAG_compile_unit
-
-; CHECK:   DW_TAG_subprogram
-; CHECK:     DW_TAG_variable
-; CHECK:     DW_TAG_variable
-; CHECK:       DW_AT_name{{.*}}"i"
-; CHECK:       DW_AT_alignment{{.*}}32
 ; CHECK:   DW_TAG_variable
-
 ; CHECK:   DW_TAG_typedef
 ; CHECK:     DW_AT_name{{.*}}"S0"
 
@@ -31,6 +24,12 @@
 ; CHECK:     DW_AT_alignment{{.*}}128
 ; CHECK:     DW_TAG_member
 ; CHECK:   DW_TAG_base_type
+
+; CHECK:   DW_TAG_subprogram
+; CHECK:     DW_TAG_variable
+; CHECK:     DW_TAG_variable
+; CHECK:       DW_AT_name{{.*}}"i"
+; CHECK:       DW_AT_alignment{{.*}}32
 
 ; CHECK:   DW_TAG_typedef
 ; CHECK:     DW_AT_name{{.*}}"S1"
@@ -55,8 +54,8 @@ define void @f() #0 !dbg !14 {
 entry:
   %s1 = alloca %struct.S1, align 64
   %i = alloca i32, align 32
-  call void @llvm.dbg.declare(metadata %struct.S1* %s1, metadata !17, metadata !22), !dbg !23
-  call void @llvm.dbg.declare(metadata i32* %i, metadata !24, metadata !22), !dbg !26
+  call void @llvm.dbg.declare(metadata ptr %s1, metadata !17, metadata !22), !dbg !23
+  call void @llvm.dbg.declare(metadata ptr %i, metadata !24, metadata !22), !dbg !26
   ret void, !dbg !27
 }
 

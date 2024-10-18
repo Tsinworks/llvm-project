@@ -1,4 +1,6 @@
-// RUN: %clang_cc1 -std=c++17 -verify %s
+// RUN: %clang_cc1 -std=c++17 -Wc++20-extensions -verify=expected %s
+// RUN: %clang_cc1 -std=c++20 -Wpre-c++20-compat -verify=expected %s
+// RUN: %clang_cc1 -std=c++20 -Wpre-c++20-compat -fexperimental-new-constant-interpreter -verify=expected %s
 
 void use_from_own_init() {
   auto [a] = a; // expected-error {{binding 'a' cannot appear in the initializer of its own decomposition declaration}}
@@ -46,25 +48,58 @@ constexpr int f(S s) {
 }
 static_assert(f({1, 2}) == 12);
 
-constexpr bool g(S &&s) { 
+constexpr bool g(S &&s) {
   auto &[a, b] = s;
   return &a == &s.a && &b == &s.b && &a != &b;
 }
 static_assert(g({1, 2}));
 
-auto [outer1, outer2] = S{1, 2};
+struct S1 {
+  int a, b;
+};
+struct S2 {
+  int a : 1; // expected-note 2{{bit-field is declared here}}
+  int b;
+};
+
+auto [outer1, outer2] = S1{1, 2};
+auto [outerbit1, outerbit2] = S1{1, 2}; // expected-note {{declared here}}
+
 void enclosing() {
   struct S { int a = outer1; };
-  auto [n] = S(); // expected-note 2{{'n' declared here}}
+  auto [n] = S(); // expected-note 3{{'n' declared here}}
 
-  struct Q { int f() { return n; } }; // expected-error {{reference to local binding 'n' declared in enclosing function}}
-  (void) [&] { return n; }; // expected-error {{reference to local binding 'n' declared in enclosing function}}
-  (void) [n] {}; // expected-error {{'n' in capture list does not name a variable}}
+  struct Q {
+    int f() { return n; } // expected-error {{reference to local binding 'n' declared in enclosing function 'enclosing'}}
+  };
 
-  static auto [m] = S(); // expected-warning {{extension}}
+  (void)[&] { return n; }; // expected-warning {{C++20}}
+  (void)[n] { return n; }; // expected-warning {{C++20}}
+
+  static auto [m] = S(); // expected-note {{'m' declared here}} \
+                         // expected-warning {{C++20}}
+
   struct R { int f() { return m; } };
   (void) [&] { return m; };
-  (void) [m] {}; // expected-error {{'m' in capture list does not name a variable}}
+  (void)[m]{}; // expected-error {{'m' cannot be captured because it does not have automatic storage duration}}
+
+  (void)[outerbit1]{}; // expected-error {{'outerbit1' cannot be captured because it does not have automatic storage duration}}
+
+  auto [bit, var] = S2{-1, 1}; // expected-note 2{{'bit' declared here}}
+
+  (void)[&bit] { // expected-error {{non-const reference cannot bind to bit-field 'a'}} \
+                    // expected-warning {{C++20}}
+    return bit;
+  };
+
+  union { // expected-note {{declared here}}
+    int u;
+  };
+
+  (void)[&] { return bit + u; } // expected-error {{unnamed variable cannot be implicitly captured in a lambda expression}} \
+                                // expected-error {{non-const reference cannot bind to bit-field 'a'}} \
+                                // expected-warning {{C++20}}
+  ();
 }
 
 void bitfield() {
@@ -98,7 +133,7 @@ template <class T> void dependent_foreach(T t) {
 
 struct PR37352 {
   int n;
-  void f() { static auto [a] = *this; } // expected-warning {{C++20 extension}}
+  void f() { static auto [a] = *this; } // expected-warning {{C++20}}
 };
 
 namespace instantiate_template {
@@ -163,4 +198,40 @@ namespace lambdas {
   }
 }
 
-// FIXME: by-value array copies
+namespace by_value_array_copy {
+  struct explicit_copy {
+    explicit_copy() = default; // expected-note 2{{candidate constructor not viable: requires 0 arguments, but 1 was provided}}
+    explicit explicit_copy(const explicit_copy&) = default; // expected-note 2{{explicit constructor is not a candidate}}
+  };
+
+  constexpr int direct_initialization_for_elements() {
+    explicit_copy ec_arr[2];
+    auto [a1, b1](ec_arr);
+
+    int arr[3]{1, 2, 3};
+    auto [a2, b2, c2](arr);
+    arr[0]--;
+    return a2 + b2 + c2 + arr[0];
+  }
+  static_assert(direct_initialization_for_elements() == 6);
+
+  constexpr int copy_initialization_for_elements() {
+    int arr[2]{4, 5};
+    auto [a1, b1] = arr;
+    auto [a2, b2]{arr}; // GH31813
+    arr[0] = 0;
+    return a1 + b1 + a2 + b2 + arr[0];
+  }
+  static_assert(copy_initialization_for_elements() == 18);
+
+  void copy_initialization_for_elements_with_explicit_copy_ctor() {
+    explicit_copy ec_arr[2];
+    auto [a1, b1] = ec_arr; // expected-error {{no matching constructor for initialization of 'explicit_copy[2]'}}
+    auto [a2, b2]{ec_arr}; // expected-error {{no matching constructor for initialization of 'explicit_copy[2]'}}
+
+    // Test prvalue
+    using T = explicit_copy[2];
+    auto [a3, b3] = T{};
+    auto [a4, b4]{T{}};
+  }
+} // namespace by_value_array_copy

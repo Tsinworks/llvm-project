@@ -1,4 +1,4 @@
-//===-- M68kRegisterBankInfo.h ---------------------------------*- C++ -*-===//
+//===-- M68kRegisterBankInfo.h ----------------------------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -13,7 +13,7 @@
 #ifndef LLVM_LIB_TARGET_M68K_GLSEL_M68KREGISTERBANKINFO_H
 #define LLVM_LIB_TARGET_M68K_GLSEL_M68KREGISTERBANKINFO_H
 
-#include "llvm/CodeGen/GlobalISel/RegisterBankInfo.h"
+#include "llvm/CodeGen/RegisterBankInfo.h"
 
 #define GET_REGBANK_DECLARATIONS
 #include "M68kGenRegisterBank.inc"
@@ -35,11 +35,8 @@ class M68kRegisterBankInfo final : public M68kGenRegisterBankInfo {
 public:
   M68kRegisterBankInfo(const TargetRegisterInfo &TRI);
 
-  const RegisterBank &getRegBankFromRegClass(const TargetRegisterClass &RC,
-                                             LLT) const override;
-
   const InstructionMapping &
   getInstrMapping(const MachineInstr &MI) const override;
 };
 } // end namespace llvm
-#endif
+#endif // LLVM_LIB_TARGET_M68K_GLSEL_M68KREGISTERBANKINFO_H

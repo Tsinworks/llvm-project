@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-codegen -S < %s | FileCheck %s
+; RUN: opt %loadNPMPolly -passes=polly-codegen -S < %s | FileCheck %s
 ;
 ; llvm.org/PR25438
 ; After loop versioning, a dominance check of a non-affine subregion's exit node
@@ -10,10 +10,10 @@
 ; This checks that the stored value is indeed from the generated code.
 ;
 ; CHECK-LABEL: polly.stmt.do.body.entry:
-; CHECK:        a.phiops.reload = load i32, i32* %a.phiops
+; CHECK:        a.phiops.reload = load i32, ptr %a.phiops
 ;
 ; CHECK-LABEL: polly.stmt.polly.merge_new_and_old.exit:
-; CHECK:         store i32 %polly.a, i32* %a.s2a
+; CHECK:         store i32 %polly.a, ptr %a.s2a
 
 define void @func() {
 entry:

@@ -329,7 +329,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr &MI,
       int FI = op(1).getIndex();
       int Off = op(2).getImm();
       unsigned A = MFI.getObjectAlign(FI).value() + std::abs(Off);
-      unsigned L = countTrailingZeros(A);
+      unsigned L = llvm::countr_zero(A);
       RegisterCell RC = RegisterCell::self(Reg[0].Reg, W0);
       RC.fill(0, L, BT::BitValue::Zero);
       return rr0(RC, Outputs);
@@ -491,6 +491,11 @@ bool HexagonEvaluator::evaluate(const MachineInstr &MI,
     case M2_maci: {
       RegisterCell M = eMLS(rc(2), rc(3));
       RegisterCell RC = eADD(rc(1), lo(M, W0));
+      return rr0(RC, Outputs);
+    }
+    case M2_mnaci: {
+      RegisterCell M = eMLS(rc(2), rc(3));
+      RegisterCell RC = eSUB(rc(1), lo(M, W0));
       return rr0(RC, Outputs);
     }
     case M2_mpysmi: {
@@ -992,7 +997,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr &BI,
     case Hexagon::J2_jumpfnew:
     case Hexagon::J2_jumpfnewpt:
       Negated = true;
-      LLVM_FALLTHROUGH;
+      [[fallthrough]];
     case Hexagon::J2_jumpt:
     case Hexagon::J2_jumptpt:
     case Hexagon::J2_jumptnew:
@@ -1218,7 +1223,7 @@ bool HexagonEvaluator::evaluateFormalCopy(const MachineInstr &MI,
   RegisterRef RD = MI.getOperand(0);
   RegisterRef RS = MI.getOperand(1);
   assert(RD.Sub == 0);
-  if (!Register::isPhysicalRegister(RS.Reg))
+  if (!RS.Reg.isPhysical())
     return false;
   RegExtMap::const_iterator F = VRX.find(RD.Reg);
   if (F == VRX.end())
@@ -1282,7 +1287,7 @@ unsigned HexagonEvaluator::getNextPhysReg(unsigned PReg, unsigned Width) const {
 }
 
 unsigned HexagonEvaluator::getVirtRegFor(unsigned PReg) const {
-  for (std::pair<unsigned,unsigned> P : MRI.liveins())
+  for (std::pair<MCRegister, Register> P : MRI.liveins())
     if (P.first == PReg)
       return P.second;
   return 0;

@@ -56,6 +56,27 @@ runAsMainWrapper(const char *ArgData, size_t ArgSize) {
       .release();
 }
 
+static llvm::orc::shared::CWrapperFunctionResult
+runAsVoidFunctionWrapper(const char *ArgData, size_t ArgSize) {
+  return WrapperFunction<rt::SPSRunAsVoidFunctionSignature>::handle(
+             ArgData, ArgSize,
+             [](ExecutorAddr MainAddr) -> int32_t {
+               return runAsVoidFunction(MainAddr.toPtr<int32_t (*)(void)>());
+             })
+      .release();
+}
+
+static llvm::orc::shared::CWrapperFunctionResult
+runAsIntFunctionWrapper(const char *ArgData, size_t ArgSize) {
+  return WrapperFunction<rt::SPSRunAsIntFunctionSignature>::handle(
+             ArgData, ArgSize,
+             [](ExecutorAddr MainAddr, int32_t Arg) -> int32_t {
+               return runAsIntFunction(MainAddr.toPtr<int32_t (*)(int32_t)>(),
+                                       Arg);
+             })
+      .release();
+}
+
 void addTo(StringMap<ExecutorAddr> &M) {
   M[rt::MemoryWriteUInt8sWrapperName] = ExecutorAddr::fromPtr(
       &writeUIntsWrapper<tpctypes::UInt8Write,
@@ -71,12 +92,15 @@ void addTo(StringMap<ExecutorAddr> &M) {
                          shared::SPSMemoryAccessUInt64Write>);
   M[rt::MemoryWriteBuffersWrapperName] =
       ExecutorAddr::fromPtr(&writeBuffersWrapper);
-  M[rt::RegisterEHFrameSectionCustomDirectWrapperName] = ExecutorAddr::fromPtr(
-      &llvm_orc_registerEHFrameSectionCustomDirectWrapper);
-  M[rt::DeregisterEHFrameSectionCustomDirectWrapperName] =
-      ExecutorAddr::fromPtr(
-          &llvm_orc_deregisterEHFrameSectionCustomDirectWrapper);
+  M[rt::RegisterEHFrameSectionWrapperName] =
+      ExecutorAddr::fromPtr(&llvm_orc_registerEHFrameSectionWrapper);
+  M[rt::DeregisterEHFrameSectionWrapperName] =
+      ExecutorAddr::fromPtr(&llvm_orc_deregisterEHFrameSectionWrapper);
   M[rt::RunAsMainWrapperName] = ExecutorAddr::fromPtr(&runAsMainWrapper);
+  M[rt::RunAsVoidFunctionWrapperName] =
+      ExecutorAddr::fromPtr(&runAsVoidFunctionWrapper);
+  M[rt::RunAsIntFunctionWrapperName] =
+      ExecutorAddr::fromPtr(&runAsIntFunctionWrapper);
 }
 
 } // end namespace rt_bootstrap

@@ -54,10 +54,11 @@ public:
   /// the number of bytes to probe in RAX/EAX.
   /// \p InstrNum optionally contains a debug-info instruction number for the
   ///    new stack pointer.
-  void emitStackProbe(
-      MachineFunction &MF, MachineBasicBlock &MBB,
-      MachineBasicBlock::iterator MBBI, const DebugLoc &DL, bool InProlog,
-      Optional<MachineFunction::DebugInstrOperandPair> InstrNum = None) const;
+  void emitStackProbe(MachineFunction &MF, MachineBasicBlock &MBB,
+                      MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+                      bool InProlog,
+                      std::optional<MachineFunction::DebugInstrOperandPair>
+                          InstrNum = std::nullopt) const;
 
   bool stackProbeFunctionModifiesSP() const override;
 
@@ -65,9 +66,8 @@ public:
   void inlineStackProbe(MachineFunction &MF,
                         MachineBasicBlock &PrologMBB) const override;
 
-  void
-  emitCalleeSavedFrameMoves(MachineBasicBlock &MBB,
-                            MachineBasicBlock::iterator MBBI) const override;
+  void emitCalleeSavedFrameMovesFullCFA(
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI) const override;
 
   void emitCalleeSavedFrameMoves(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MBBI,
@@ -103,7 +103,8 @@ public:
                               MutableArrayRef<CalleeSavedInfo> CSI,
                               const TargetRegisterInfo *TRI) const override;
 
-  bool hasFP(const MachineFunction &MF) const override;
+  void spillFPBP(MachineFunction &MF) const override;
+
   bool hasReservedCallFrame(const MachineFunction &MF) const override;
   bool canSimplifyCallFramePseudos(const MachineFunction &MF) const override;
   bool needsFrameIndexResolution(const MachineFunction &MF) const override;
@@ -177,7 +178,8 @@ public:
 
   /// Wraps up getting a CFI index and building a MachineInstr for it.
   void BuildCFI(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-                const DebugLoc &DL, const MCCFIInstruction &CFIInst) const;
+                const DebugLoc &DL, const MCCFIInstruction &CFIInst,
+                MachineInstr::MIFlag Flag = MachineInstr::NoFlags) const;
 
   /// Sets up EBP and optionally ESI based on the incoming EBP value.  Only
   /// needed for 32-bit. Used in funclet prologues and at catchret destinations.
@@ -192,9 +194,14 @@ public:
 
   Register getInitialCFARegister(const MachineFunction &MF) const override;
 
+  DwarfFrameBase getDwarfFrameBase(const MachineFunction &MF) const override;
+
   /// Return true if the function has a redzone (accessible bytes past the
   /// frame of the top of stack function) as part of it's ABI.
   bool has128ByteRedZone(const MachineFunction& MF) const;
+
+protected:
+  bool hasFPImpl(const MachineFunction &MF) const override;
 
 private:
   bool isWin64Prologue(const MachineFunction &MF) const;
@@ -207,7 +214,7 @@ private:
   void emitStackProbeCall(
       MachineFunction &MF, MachineBasicBlock &MBB,
       MachineBasicBlock::iterator MBBI, const DebugLoc &DL, bool InProlog,
-      Optional<MachineFunction::DebugInstrOperandPair> InstrNum) const;
+      std::optional<MachineFunction::DebugInstrOperandPair> InstrNum) const;
 
   /// Emit target stack probe as an inline sequence.
   void emitStackProbeInline(MachineFunction &MF, MachineBasicBlock &MBB,
@@ -233,6 +240,10 @@ private:
                                        MachineBasicBlock::iterator MBBI,
                                        const DebugLoc &DL, uint64_t Offset,
                                        uint64_t Align) const;
+
+  /// Emit target zero call-used regs.
+  void emitZeroCallUsedRegs(BitVector RegsToZero,
+                            MachineBasicBlock &MBB) const override;
 
   void adjustFrameForMsvcCxxEh(MachineFunction &MF) const;
 
@@ -260,6 +271,34 @@ private:
   void emitCatchRetReturnValue(MachineBasicBlock &MBB,
                                MachineBasicBlock::iterator MBBI,
                                MachineInstr *CatchRet) const;
+
+  /// Issue instructions to allocate stack space and spill frame pointer and/or
+  /// base pointer to stack using stack pointer register.
+  void spillFPBPUsingSP(MachineFunction &MF,
+                        const MachineBasicBlock::iterator BeforeMI, Register FP,
+                        Register BP, int SPAdjust) const;
+
+  /// Issue instructions to restore frame pointer and/or base pointer from stack
+  /// using stack pointer register, and free stack space.
+  void restoreFPBPUsingSP(MachineFunction &MF,
+                          const MachineBasicBlock::iterator AfterMI,
+                          Register FP, Register BP, int SPAdjust) const;
+
+  void saveAndRestoreFPBPUsingSP(MachineFunction &MF,
+                                 MachineBasicBlock::iterator BeforeMI,
+                                 MachineBasicBlock::iterator AfterMI,
+                                 bool SpillFP, bool SpillBP) const;
+
+  void checkInterferedAccess(MachineFunction &MF,
+                             MachineBasicBlock::reverse_iterator DefMI,
+                             MachineBasicBlock::reverse_iterator KillMI,
+                             bool SpillFP, bool SpillBP) const;
+
+  // If MI uses fp/bp, but target can handle it, and doesn't want to be spilled
+  // again, this function should return true, and update MI so we will not check
+  // any instructions from related sequence.
+  bool skipSpillFPBP(MachineFunction &MF,
+                     MachineBasicBlock::reverse_iterator &MI) const;
 };
 
 } // End llvm namespace

@@ -1,7 +1,3 @@
-// REQUIRES: clang-driver
-// REQUIRES: x86-registered-target
-// REQUIRES: amdgpu-registered-target
-
 // RUN: not %clang -target amdgcn-amd-amdhsa \
 // RUN:   -mcpu=gfx908xnack -nostdlib \
 // RUN:   %s 2>&1 | FileCheck -check-prefix=NOPLUS %s

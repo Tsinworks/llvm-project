@@ -12,38 +12,46 @@
 
 using namespace clang::ast_matchers;
 
-namespace clang {
-namespace tidy {
-namespace misc {
+namespace clang::tidy::misc {
+
+namespace {
+
+AST_MATCHER_P(CXXMethodDecl, firstParameter,
+              ast_matchers::internal::Matcher<ParmVarDecl>, InnerMatcher) {
+  unsigned N = Node.isExplicitObjectMemberFunction() ? 1 : 0;
+  return (N < Node.parameters().size() &&
+          InnerMatcher.matches(*Node.parameters()[N], Finder, Builder));
+}
+} // namespace
 
 void UnconventionalAssignOperatorCheck::registerMatchers(
     ast_matchers::MatchFinder *Finder) {
-  const auto HasGoodReturnType = cxxMethodDecl(returns(lValueReferenceType(
-      pointee(unless(isConstQualified()),
-              anyOf(autoType(), hasDeclaration(equalsBoundNode("class")))))));
+  const auto HasGoodReturnType =
+      cxxMethodDecl(returns(hasCanonicalType(lValueReferenceType(pointee(
+          unless(isConstQualified()),
+          anyOf(autoType(), hasDeclaration(equalsBoundNode("class"))))))));
 
-  const auto IsSelf = qualType(
+  const auto IsSelf = qualType(hasCanonicalType(
       anyOf(hasDeclaration(equalsBoundNode("class")),
-            referenceType(pointee(hasDeclaration(equalsBoundNode("class"))))));
+            referenceType(pointee(hasDeclaration(equalsBoundNode("class")))))));
   const auto IsAssign =
       cxxMethodDecl(unless(anyOf(isDeleted(), isPrivate(), isImplicit())),
                     hasName("operator="), ofClass(recordDecl().bind("class")))
           .bind("method");
   const auto IsSelfAssign =
-      cxxMethodDecl(IsAssign, hasParameter(0, parmVarDecl(hasType(IsSelf))))
+      cxxMethodDecl(IsAssign, firstParameter(parmVarDecl(hasType(IsSelf))))
           .bind("method");
 
   Finder->addMatcher(
       cxxMethodDecl(IsAssign, unless(HasGoodReturnType)).bind("ReturnType"),
       this);
 
-  const auto BadSelf = referenceType(
+  const auto BadSelf = qualType(hasCanonicalType(referenceType(
       anyOf(lValueReferenceType(pointee(unless(isConstQualified()))),
-            rValueReferenceType(pointee(isConstQualified()))));
+            rValueReferenceType(pointee(isConstQualified()))))));
 
   Finder->addMatcher(
-      cxxMethodDecl(IsSelfAssign,
-                    hasParameter(0, parmVarDecl(hasType(BadSelf))))
+      cxxMethodDecl(IsSelfAssign, firstParameter(parmVarDecl(hasType(BadSelf))))
           .bind("ArgumentType"),
       this);
 
@@ -88,6 +96,4 @@ void UnconventionalAssignOperatorCheck::check(
   }
 }
 
-} // namespace misc
-} // namespace tidy
-} // namespace clang
+} // namespace clang::tidy::misc

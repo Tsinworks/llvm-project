@@ -1,8 +1,8 @@
 // RUN: rm -rf %t
 // RUN: mkdir -p %t
-// RUN: %clang -std=c++20 %S/Inputs/module-transtive-instantiation/Templ.cppm --precompile -o %t/Templ.pcm
-// RUN: %clang -std=c++20 %S/Inputs/module-transtive-instantiation/bar.cppm  --precompile -fprebuilt-module-path=%t -o %t/bar.pcm
-// RUN: %clang -std=c++20 -fprebuilt-module-path=%t %s -c -Xclang -verify
+// RUN: %clang_cc1 -std=c++20 %S/Inputs/module-transtive-instantiation/Templ.cppm -emit-module-interface -o %t/Templ.pcm
+// RUN: %clang_cc1 -std=c++20 %S/Inputs/module-transtive-instantiation/bar.cppm  -emit-module-interface -fprebuilt-module-path=%t -o %t/bar.pcm
+// RUN: %clang_cc1 -std=c++20 -fprebuilt-module-path=%t %s -fsyntax-only -verify
 
 import bar;
 int foo() {

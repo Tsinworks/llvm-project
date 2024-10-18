@@ -38,34 +38,20 @@ void BuiltinDialect::registerLocationAttributes() {
 //===----------------------------------------------------------------------===//
 
 WalkResult LocationAttr::walk(function_ref<WalkResult(Location)> walkFn) {
-  if (walkFn(*this).wasInterrupted())
-    return WalkResult::interrupt();
+  AttrTypeWalker walker;
+  // Walk locations, but skip any other attribute.
+  walker.addWalk([&](Attribute attr) {
+    if (auto loc = llvm::dyn_cast<LocationAttr>(attr))
+      return walkFn(loc);
 
-  return TypeSwitch<LocationAttr, WalkResult>(*this)
-      .Case([&](CallSiteLoc callLoc) -> WalkResult {
-        if (callLoc.getCallee()->walk(walkFn).wasInterrupted())
-          return WalkResult::interrupt();
-        return callLoc.getCaller()->walk(walkFn);
-      })
-      .Case([&](FusedLoc fusedLoc) -> WalkResult {
-        for (Location subLoc : fusedLoc.getLocations())
-          if (subLoc->walk(walkFn).wasInterrupted())
-            return WalkResult::interrupt();
-        return WalkResult::advance();
-      })
-      .Case([&](NameLoc nameLoc) -> WalkResult {
-        return nameLoc.getChildLoc()->walk(walkFn);
-      })
-      .Case([&](OpaqueLoc opaqueLoc) -> WalkResult {
-        return opaqueLoc.getFallbackLocation()->walk(walkFn);
-      })
-      .Default(WalkResult::advance());
+    return WalkResult::skip();
+  });
+  return walker.walk<WalkOrder::PreOrder>(*this);
 }
 
 /// Methods for support type inquiry through isa, cast, and dyn_cast.
 bool LocationAttr::classof(Attribute attr) {
-  return attr.isa<CallSiteLoc, FileLineColLoc, FusedLoc, NameLoc, OpaqueLoc,
-                  UnknownLoc>();
+  return attr.hasTrait<AttributeTrait::IsLocation>();
 }
 
 //===----------------------------------------------------------------------===//
@@ -91,7 +77,7 @@ Location FusedLoc::get(ArrayRef<Location> locs, Attribute metadata,
   for (auto loc : locs) {
     // If the location is a fused location we decompose it if it has no
     // metadata or the metadata is the same as the top level metadata.
-    if (auto fusedLoc = loc.dyn_cast<FusedLoc>()) {
+    if (auto fusedLoc = llvm::dyn_cast<FusedLoc>(loc)) {
       if (fusedLoc.getMetadata() == metadata) {
         // UnknownLoc's have already been removed from FusedLocs so we can
         // simply add all of the internal locations.
@@ -101,15 +87,23 @@ Location FusedLoc::get(ArrayRef<Location> locs, Attribute metadata,
       }
     }
     // Otherwise, only add known locations to the set.
-    if (!loc.isa<UnknownLoc>())
+    if (!llvm::isa<UnknownLoc>(loc))
       decomposedLocs.insert(loc);
   }
   locs = decomposedLocs.getArrayRef();
 
-  // Handle the simple cases of less than two locations.
-  if (locs.empty())
-    return UnknownLoc::get(context);
-  if (locs.size() == 1)
+  // Handle the simple cases of less than two locations. Ensure the metadata (if
+  // provided) is not dropped.
+  if (locs.empty()) {
+    if (!metadata)
+      return UnknownLoc::get(context);
+    // TODO: Investigate ASAN failure when using implicit conversion from
+    // Location to ArrayRef<Location> below.
+    return Base::get(context, ArrayRef<Location>{UnknownLoc::get(context)},
+                     metadata);
+  }
+  if (locs.size() == 1 && !metadata)
     return locs.front();
+
   return Base::get(context, locs, metadata);
 }

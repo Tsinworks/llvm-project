@@ -1,12 +1,23 @@
-static_library("liblldb") {
-  # XXX if win -DEXPORT_LIBLLDB
+# The LLDB_IN_LIBLLDB setup requires that liblldb is a shared_library
+# on Windows.
+# FIXME: Consider making it a shared_library everywhere like in cmake?
+# (Having it a static_library is simpler -- no need for
+# -Wl,-runpath=$ORIGIN/../lib in executables on unix or the corresponding @loader_path on mac,
+# no need for .exports files, etc.)
+if (current_os == "win") {
+  liblldb_type = "shared_library"
+} else {
+  liblldb_type = "static_library"
+}
 
+target(liblldb_type, "liblldb") {
   # XXX LLDB_BUILD_FRAMEWORK
   # XXX LLDB_ENABLE_PYTHON
   # XXX LLDB_ENABLE_LUA
 
   output_name = "liblldb"  # XXX lib prefix?
   configs += [ "//llvm/utils/gn/build:lldb_code" ]
+  public_deps = [ "//lldb/include/lldb/API:SBLanguages" ]
   deps = [
     "//lldb/include/lldb/Host:Config",
     "//lldb/source/Breakpoint",
@@ -29,6 +40,8 @@ static_library("liblldb") {
   include_dirs = [ ".." ]
   sources = [
     "SBAddress.cpp",
+    "SBAddressRange.cpp",
+    "SBAddressRangeList.cpp",
     "SBAttachInfo.cpp",
     "SBBlock.cpp",
     "SBBreakpoint.cpp",
@@ -52,6 +65,7 @@ static_library("liblldb") {
     "SBFile.cpp",
     "SBFileSpec.cpp",
     "SBFileSpecList.cpp",
+    "SBFormat.cpp",
     "SBFrame.cpp",
     "SBFunction.cpp",
     "SBHostOS.cpp",
@@ -68,11 +82,15 @@ static_library("liblldb") {
     "SBPlatform.cpp",
     "SBProcess.cpp",
     "SBProcessInfo.cpp",
+    "SBProcessInfoList.cpp",
     "SBQueue.cpp",
     "SBQueueItem.cpp",
     "SBReproducer.cpp",
+    "SBSaveCoreOptions.cpp",
+    "SBScriptObject.cpp",
     "SBSection.cpp",
     "SBSourceManager.cpp",
+    "SBStatisticsOptions.cpp",
     "SBStream.cpp",
     "SBStringList.cpp",
     "SBStructuredData.cpp",
@@ -84,6 +102,7 @@ static_library("liblldb") {
     "SBThreadCollection.cpp",
     "SBThreadPlan.cpp",
     "SBTrace.cpp",
+    "SBTraceCursor.cpp",
     "SBType.cpp",
     "SBTypeCategory.cpp",
     "SBTypeEnumMember.cpp",
@@ -97,8 +116,13 @@ static_library("liblldb") {
     "SBValueList.cpp",
     "SBVariablesOptions.cpp",
     "SBWatchpoint.cpp",
+    "SBWatchpointOptions.cpp",
     "SystemInitializerFull.cpp",
   ]
+
+  if (current_os == "win") {
+    defines = [ "LLDB_IN_LIBLLDB" ]
+  }
 
   # XXX liblldb.exports or liblldb-private.expoorts
   # XXX dep on clang resource directory

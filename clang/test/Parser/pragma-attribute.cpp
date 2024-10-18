@@ -127,7 +127,7 @@ void function();
 // expected-error@-1 {{attribute 'objc_bridge_related' can't be applied to 'function'}}
 #pragma clang attribute pop
 
-#pragma clang attribute push (__attribute__((objc_bridge_related(1))), apply_to=function) // expected-error {{expected a related ObjectiveC class name, e.g., 'NSColor'}}
+#pragma clang attribute push (__attribute__((objc_bridge_related(1))), apply_to=function) // expected-error {{expected a related Objective-C class name, e.g., 'NSColor'}}
 
 #pragma clang attribute push (__attribute__((used)), apply_to=function) // expected-error {{attribute 'used' is not supported by '#pragma clang attribute'}}
 
@@ -153,9 +153,6 @@ _Pragma("clang attribute pop");
 
 #pragma clang attribute push ([[gnu::abi_tag]], apply_to=any(function))
 #pragma clang attribute pop
-
-#pragma clang attribute push ([[clang::disable_tail_calls, noreturn]], apply_to = function) // expected-error {{more than one attribute specified in '#pragma clang attribute push'}}
-#pragma clang attribute push ([[clang::disable_tail_calls, noreturn]]) // expected-error {{more than one attribute specified in '#pragma clang attribute push'}}
 
 #pragma clang attribute push ([[gnu::abi_tag]], apply_to=namespace)
 #pragma clang attribute pop
@@ -210,3 +207,13 @@ _Pragma("clang attribute pop");
 #pragma clang attribute push([[clang::uninitialized]], apply_to=any) // expected-error {{expected '('}}
 #pragma clang attribute push([[clang::uninitialized]], apply_to = any()) // expected-error {{expected an identifier that corresponds to an attribute subject rule}}
 // NB: neither of these need to be popped; they were never successfully pushed.
+
+#pragma clang attribute push ([[clang::disable_tail_calls, noreturn]], apply_to = function)
+#pragma clang attribute pop
+
+#pragma clang attribute push (__attribute__((disable_tail_calls, annotate("test"))), apply_to = function)
+#pragma clang attribute pop
+
+#pragma clang attribute push (__attribute__((disable_tail_calls,)), apply_to = function) // expected-error {{expected identifier that represents an attribute name}}
+
+#pragma clang attribute push ([[clang::disable_tail_calls, noreturn]]) // expected-error {{expected ','}}

@@ -2,12 +2,12 @@
 
 # RUN: llvm-mc -filetype=obj -triple=x86_64-apple-macos -o %t.o %s
 
-# RUN: %no_fatal_warnings_lld --warn-dylib-install-name -o %t.exec %t.o \
+# RUN: %no-fatal-warnings-lld --warn-dylib-install-name -o %t.exec %t.o \
 # RUN:     -install_name foo 2>&1 | FileCheck --check-prefix=WARN %s
 # RUN: llvm-objdump --macho --all-headers %t.exec \
 # RUN:     | FileCheck --check-prefix=NO-ID %s
 
-# RUN: %no_fatal_warnings_lld --warn-dylib-install-name -bundle -o %t.bundle %t.o \
+# RUN: %no-fatal-warnings-lld --warn-dylib-install-name -bundle -o %t.bundle %t.o \
 # RUN:     -install_name foo 2>&1 | FileCheck --check-prefix=WARN %s
 # RUN: llvm-objdump --macho --all-headers %t.bundle \
 # RUN:     | FileCheck --check-prefix=NO-ID %s
@@ -31,7 +31,7 @@
 
 # ID:          cmd LC_ID_DYLIB
 # ID-NEXT: cmdsize
-# LID-NEXT:   name foo
+# ID-NEXT:   name foo
 
 .globl _main
 _main:

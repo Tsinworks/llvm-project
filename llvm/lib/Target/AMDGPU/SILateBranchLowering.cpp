@@ -30,6 +30,7 @@ private:
   const SIInstrInfo *TII = nullptr;
   MachineDominatorTree *MDT = nullptr;
 
+  void expandChainCall(MachineInstr &MI);
   void earlyTerm(MachineInstr &MI, MachineBasicBlock *EarlyExitBlock);
 
 public:
@@ -47,8 +48,8 @@ public:
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<MachineDominatorTree>();
-    AU.addPreserved<MachineDominatorTree>();
+    AU.addRequired<MachineDominatorTreeWrapperPass>();
+    AU.addPreserved<MachineDominatorTreeWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 };
@@ -59,7 +60,7 @@ char SILateBranchLowering::ID = 0;
 
 INITIALIZE_PASS_BEGIN(SILateBranchLowering, DEBUG_TYPE,
                       "SI insert s_cbranch_execz instructions", false, false)
-INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTreeWrapperPass)
 INITIALIZE_PASS_END(SILateBranchLowering, DEBUG_TYPE,
                     "SI insert s_cbranch_execz instructions", false, false)
 
@@ -72,16 +73,22 @@ static void generateEndPgm(MachineBasicBlock &MBB,
   bool IsPS = F.getCallingConv() == CallingConv::AMDGPU_PS;
 
   // Check if hardware has been configured to expect color or depth exports.
-  bool HasExports =
-      AMDGPU::getHasColorExport(F) || AMDGPU::getHasDepthExport(F);
+  bool HasColorExports = AMDGPU::getHasColorExport(F);
+  bool HasDepthExports = AMDGPU::getHasDepthExport(F);
+  bool HasExports = HasColorExports || HasDepthExports;
 
   // Prior to GFX10, hardware always expects at least one export for PS.
   bool MustExport = !AMDGPU::isGFX10Plus(TII->getSubtarget());
 
   if (IsPS && (HasExports || MustExport)) {
     // Generate "null export" if hardware is expecting PS to export.
+    const GCNSubtarget &ST = MBB.getParent()->getSubtarget<GCNSubtarget>();
+    int Target =
+        ST.hasNullExportTarget()
+            ? AMDGPU::Exp::ET_NULL
+            : (HasColorExports ? AMDGPU::Exp::ET_MRT0 : AMDGPU::Exp::ET_MRTZ);
     BuildMI(MBB, I, DL, TII->get(AMDGPU::EXP_DONE))
-        .addImm(AMDGPU::Exp::ET_NULL)
+        .addImm(Target)
         .addReg(AMDGPU::VGPR0, RegState::Undef)
         .addReg(AMDGPU::VGPR0, RegState::Undef)
         .addReg(AMDGPU::VGPR0, RegState::Undef)
@@ -110,6 +117,18 @@ static void splitBlock(MachineBasicBlock &MBB, MachineInstr &MI,
   MDT->getBase().applyUpdates(DTUpdates);
 }
 
+void SILateBranchLowering::expandChainCall(MachineInstr &MI) {
+  // This is a tail call that needs to be expanded into at least
+  // 2 instructions, one for setting EXEC and one for the actual tail call.
+  constexpr unsigned ExecIdx = 3;
+
+  BuildMI(*MI.getParent(), MI, MI.getDebugLoc(), TII->get(MovOpc), ExecReg)
+      ->addOperand(MI.getOperand(ExecIdx));
+  MI.removeOperand(ExecIdx);
+
+  MI.setDesc(TII->get(AMDGPU::SI_TCRETURN));
+}
+
 void SILateBranchLowering::earlyTerm(MachineInstr &MI,
                                      MachineBasicBlock *EarlyExitBlock) {
   MachineBasicBlock &MBB = *MI.getParent();
@@ -130,7 +149,7 @@ bool SILateBranchLowering::runOnMachineFunction(MachineFunction &MF) {
   const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
   TII = ST.getInstrInfo();
   TRI = &TII->getRegisterInfo();
-  MDT = &getAnalysis<MachineDominatorTree>();
+  MDT = &getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
 
   MovOpc = ST.isWave32() ? AMDGPU::S_MOV_B32 : AMDGPU::S_MOV_B64;
   ExecReg = ST.isWave32() ? AMDGPU::EXEC_LO : AMDGPU::EXEC;
@@ -150,6 +169,12 @@ bool SILateBranchLowering::runOnMachineFunction(MachineFunction &MF) {
           MI.eraseFromParent();
           MadeChange = true;
         }
+        break;
+
+      case AMDGPU::SI_CS_CHAIN_TC_W32:
+      case AMDGPU::SI_CS_CHAIN_TC_W64:
+        expandChainCall(MI);
+        MadeChange = true;
         break;
 
       case AMDGPU::SI_EARLY_TERMINATE_SCC0:
@@ -200,8 +225,8 @@ bool SILateBranchLowering::runOnMachineFunction(MachineFunction &MF) {
       MF.insert(MF.end(), EmptyMBBAtEnd);
     }
 
-    for (auto MI : EpilogInstrs) {
-      auto MBB = MI->getParent();
+    for (auto *MI : EpilogInstrs) {
+      auto *MBB = MI->getParent();
       if (MBB == &MF.back() && MI == &MBB->back())
         continue;
 

@@ -27,6 +27,7 @@
 #include "llvm/MC/TargetRegistry.h"
 
 #define GET_INSTRINFO_MC_DESC
+#define ENABLE_INSTR_PREDICATE_VERIFIER
 #include "AVRGenInstrInfo.inc"
 
 #define GET_SUBTARGETINFO_MC_DESC
@@ -71,10 +72,9 @@ static MCInstPrinter *createAVRMCInstPrinter(const Triple &T,
 static MCStreamer *createMCStreamer(const Triple &T, MCContext &Context,
                                     std::unique_ptr<MCAsmBackend> &&MAB,
                                     std::unique_ptr<MCObjectWriter> &&OW,
-                                    std::unique_ptr<MCCodeEmitter> &&Emitter,
-                                    bool RelaxAll) {
+                                    std::unique_ptr<MCCodeEmitter> &&Emitter) {
   return createELFStreamer(Context, std::move(MAB), std::move(OW),
-                           std::move(Emitter), RelaxAll);
+                           std::move(Emitter));
 }
 
 static MCTargetStreamer *
@@ -84,8 +84,7 @@ createAVRObjectTargetStreamer(MCStreamer &S, const MCSubtargetInfo &STI) {
 
 static MCTargetStreamer *createMCAsmTargetStreamer(MCStreamer &S,
                                                    formatted_raw_ostream &OS,
-                                                   MCInstPrinter *InstPrint,
-                                                   bool isVerboseAsm) {
+                                                   MCInstPrinter *InstPrint) {
   return new AVRTargetAsmStreamer(S);
 }
 

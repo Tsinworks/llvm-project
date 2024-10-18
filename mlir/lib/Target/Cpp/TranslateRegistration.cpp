@@ -6,15 +6,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/SCF/SCF.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/Target/Cpp/CppEmitter.h"
-#include "mlir/Translation.h"
+#include "mlir/Tools/mlir-translate/Translation.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace mlir;
@@ -32,19 +30,17 @@ void registerToCppTranslation() {
       llvm::cl::init(false));
 
   TranslateFromMLIRRegistration reg(
-      "mlir-to-cpp",
-      [](ModuleOp module, raw_ostream &output) {
+      "mlir-to-cpp", "translate from mlir to cpp",
+      [](Operation *op, raw_ostream &output) {
         return emitc::translateToCpp(
-            module, output,
+            op, output,
             /*declareVariablesAtTop=*/declareVariablesAtTop);
       },
       [](DialectRegistry &registry) {
         // clang-format off
-        registry.insert<arith::ArithmeticDialect,
+        registry.insert<cf::ControlFlowDialect,
                         emitc::EmitCDialect,
-                        math::MathDialect,
-                        StandardOpsDialect,
-                        scf::SCFDialect>();
+                        func::FuncDialect>();
         // clang-format on
       });
 }

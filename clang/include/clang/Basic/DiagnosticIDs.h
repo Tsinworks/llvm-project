@@ -17,10 +17,13 @@
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <optional>
 #include <vector>
 
 namespace clang {
   class DiagnosticsEngine;
+  class DiagnosticBuilder;
   class SourceLocation;
 
   // Import the diagnostic enums themselves.
@@ -30,33 +33,35 @@ namespace clang {
     // Size of each of the diagnostic categories.
     enum {
       DIAG_SIZE_COMMON        =  300,
-      DIAG_SIZE_DRIVER        =  300,
-      DIAG_SIZE_FRONTEND      =  150,
+      DIAG_SIZE_DRIVER        =  400,
+      DIAG_SIZE_FRONTEND      =  200,
       DIAG_SIZE_SERIALIZATION =  120,
       DIAG_SIZE_LEX           =  400,
-      DIAG_SIZE_PARSE         =  600,
-      DIAG_SIZE_AST           =  250,
+      DIAG_SIZE_PARSE         =  700,
+      DIAG_SIZE_AST           =  300,
       DIAG_SIZE_COMMENT       =  100,
       DIAG_SIZE_CROSSTU       =  100,
-      DIAG_SIZE_SEMA          = 4500,
+      DIAG_SIZE_SEMA          = 5000,
       DIAG_SIZE_ANALYSIS      =  100,
       DIAG_SIZE_REFACTORING   = 1000,
+      DIAG_SIZE_INSTALLAPI    =  100,
     };
     // Start position for diagnostics.
     enum {
       DIAG_START_COMMON        =                          0,
-      DIAG_START_DRIVER        = DIAG_START_COMMON        + DIAG_SIZE_COMMON,
-      DIAG_START_FRONTEND      = DIAG_START_DRIVER        + DIAG_SIZE_DRIVER,
-      DIAG_START_SERIALIZATION = DIAG_START_FRONTEND      + DIAG_SIZE_FRONTEND,
-      DIAG_START_LEX           = DIAG_START_SERIALIZATION + DIAG_SIZE_SERIALIZATION,
-      DIAG_START_PARSE         = DIAG_START_LEX           + DIAG_SIZE_LEX,
-      DIAG_START_AST           = DIAG_START_PARSE         + DIAG_SIZE_PARSE,
-      DIAG_START_COMMENT       = DIAG_START_AST           + DIAG_SIZE_AST,
-      DIAG_START_CROSSTU       = DIAG_START_COMMENT       + DIAG_SIZE_COMMENT,
-      DIAG_START_SEMA          = DIAG_START_CROSSTU       + DIAG_SIZE_CROSSTU,
-      DIAG_START_ANALYSIS      = DIAG_START_SEMA          + DIAG_SIZE_SEMA,
-      DIAG_START_REFACTORING   = DIAG_START_ANALYSIS      + DIAG_SIZE_ANALYSIS,
-      DIAG_UPPER_LIMIT         = DIAG_START_REFACTORING   + DIAG_SIZE_REFACTORING
+      DIAG_START_DRIVER        = DIAG_START_COMMON        + static_cast<int>(DIAG_SIZE_COMMON),
+      DIAG_START_FRONTEND      = DIAG_START_DRIVER        + static_cast<int>(DIAG_SIZE_DRIVER),
+      DIAG_START_SERIALIZATION = DIAG_START_FRONTEND      + static_cast<int>(DIAG_SIZE_FRONTEND),
+      DIAG_START_LEX           = DIAG_START_SERIALIZATION + static_cast<int>(DIAG_SIZE_SERIALIZATION),
+      DIAG_START_PARSE         = DIAG_START_LEX           + static_cast<int>(DIAG_SIZE_LEX),
+      DIAG_START_AST           = DIAG_START_PARSE         + static_cast<int>(DIAG_SIZE_PARSE),
+      DIAG_START_COMMENT       = DIAG_START_AST           + static_cast<int>(DIAG_SIZE_AST),
+      DIAG_START_CROSSTU       = DIAG_START_COMMENT       + static_cast<int>(DIAG_SIZE_COMMENT),
+      DIAG_START_SEMA          = DIAG_START_CROSSTU       + static_cast<int>(DIAG_SIZE_CROSSTU),
+      DIAG_START_ANALYSIS      = DIAG_START_SEMA          + static_cast<int>(DIAG_SIZE_SEMA),
+      DIAG_START_REFACTORING   = DIAG_START_ANALYSIS      + static_cast<int>(DIAG_SIZE_ANALYSIS),
+      DIAG_START_INSTALLAPI    = DIAG_START_REFACTORING   + static_cast<int>(DIAG_SIZE_REFACTORING),
+      DIAG_UPPER_LIMIT         = DIAG_START_INSTALLAPI    + static_cast<int>(DIAG_SIZE_INSTALLAPI)
     };
 
     class CustomDiagInfo;
@@ -67,7 +72,7 @@ namespace clang {
     // Get typedefs for common diagnostics.
     enum {
 #define DIAG(ENUM, FLAGS, DEFAULT_MAPPING, DESC, GROUP, SFINAE, CATEGORY,      \
-             NOWERROR, SHOWINSYSHEADER, DEFFERABLE)                            \
+             NOWERROR, SHOWINSYSHEADER, SHOWINSYSMACRO, DEFFERABLE)            \
   ENUM,
 #define COMMONSTART
 #include "clang/Basic/DiagnosticCommonKinds.inc"
@@ -99,11 +104,17 @@ namespace clang {
   }
 
 class DiagnosticMapping {
+  LLVM_PREFERRED_TYPE(diag::Severity)
   unsigned Severity : 3;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned IsUser : 1;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned IsPragma : 1;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned HasNoWarningAsError : 1;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned HasNoErrorAsFatal : 1;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned WasUpgradedFromWarning : 1;
 
 public:
@@ -158,6 +169,10 @@ public:
     Result.Severity = Bits & 0x7;
     return Result;
   }
+
+  bool operator==(DiagnosticMapping Other) const {
+    return serialize() == Other.serialize();
+  }
 };
 
 /// Used for handling and querying diagnostic IDs.
@@ -207,6 +222,9 @@ public:
   /// default.
   static bool isDefaultMappingAsError(unsigned DiagID);
 
+  /// Get the default mapping for this diagnostic.
+  static DiagnosticMapping getDefaultMapping(unsigned DiagID);
+
   /// Determine whether the given built-in diagnostic ID is a Note.
   static bool isBuiltinNote(unsigned DiagID);
 
@@ -231,6 +249,17 @@ public:
   /// "deprecated-declarations".
   static StringRef getWarningOptionForGroup(diag::Group);
 
+  /// Given a diagnostic group ID, return its documentation.
+  static StringRef getWarningOptionDocumentation(diag::Group GroupID);
+
+  /// Given a group ID, returns the flag that toggles the group.
+  /// For example, for "deprecated-declarations", returns
+  /// Group::DeprecatedDeclarations.
+  static std::optional<diag::Group> getGroupForWarningOption(StringRef);
+
+  /// Return the lowest-level group that contains the specified diagnostic.
+  static std::optional<diag::Group> getGroupForDiag(unsigned DiagID);
+
   /// Return the lowest-level warning option that enables the specified
   /// diagnostic.
   ///
@@ -250,6 +279,9 @@ public:
   /// Return true if a given diagnostic falls into an ARC diagnostic
   /// category.
   static bool isARCDiagnostic(unsigned DiagID);
+
+  /// Return true if a given diagnostic is a codegen-time ABI check.
+  static bool isCodegenABICheckDiagnostic(unsigned DiagID);
 
   /// Enumeration describing how the emission of a diagnostic should
   /// be treated when it occurs during C++ template argument deduction.
@@ -337,11 +369,13 @@ private:
   ///
   /// \returns \c true if the diagnostic was emitted, \c false if it was
   /// suppressed.
-  bool ProcessDiag(DiagnosticsEngine &Diag) const;
+  bool ProcessDiag(DiagnosticsEngine &Diag,
+                   const DiagnosticBuilder &DiagBuilder) const;
 
   /// Used to emit a diagnostic that is finally fully formed,
   /// ignoring suppression.
-  void EmitDiag(DiagnosticsEngine &Diag, Level DiagLevel) const;
+  void EmitDiag(DiagnosticsEngine &Diag, const DiagnosticBuilder &DiagBuilder,
+                Level DiagLevel) const;
 
   /// Whether the diagnostic may leave the AST in a state where some
   /// invariants can break.

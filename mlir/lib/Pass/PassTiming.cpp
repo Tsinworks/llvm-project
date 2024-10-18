@@ -12,6 +12,7 @@
 #include "llvm/Support/Threading.h"
 
 #include <chrono>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::detail;
@@ -34,9 +35,6 @@ struct PassTiming : public PassInstrumentation {
   /// parent thread into which the new thread should be nested.
   DenseMap<PipelineParentInfo, unsigned> parentTimerIndices;
 
-  /// A stack of the currently active timing scopes per thread.
-  DenseMap<uint64_t, SmallVector<TimingScope, 4>> activeThreadTimers;
-
   /// The timing manager owned by this instrumentation (in case timing was
   /// enabled by the user on the pass manager without providing an external
   /// timing manager). This *must* appear before the `ownedTimingScope` to
@@ -45,6 +43,9 @@ struct PassTiming : public PassInstrumentation {
   std::unique_ptr<TimingManager> ownedTimingManager;
   TimingScope ownedTimingScope;
 
+  /// A stack of the currently active timing scopes per thread.
+  DenseMap<uint64_t, SmallVector<TimingScope, 4>> activeThreadTimers;
+
   /// The root timing scope into which timing is reported.
   TimingScope &rootScope;
 
@@ -52,28 +53,30 @@ struct PassTiming : public PassInstrumentation {
   // Pipeline
   //===--------------------------------------------------------------------===//
 
-  void runBeforePipeline(StringAttr name,
+  void runBeforePipeline(std::optional<OperationName> name,
                          const PipelineParentInfo &parentInfo) override {
     auto tid = llvm::get_threadid();
     auto &activeTimers = activeThreadTimers[tid];
 
+    // Find the parent scope, either using the parent info or the root scope
+    // (e.g. in the case of the top-level pipeline).
     TimingScope *parentScope;
-    if (activeTimers.empty()) {
-      auto it = parentTimerIndices.find(parentInfo);
-      if (it != parentTimerIndices.end())
-        parentScope =
-            &activeThreadTimers[parentInfo.parentThreadID][it->second];
-      else
-        parentScope = &rootScope;
-    } else {
-      parentScope = &activeTimers.back();
-    }
-    activeTimers.push_back(parentScope->nest(name.getAsOpaquePointer(), [name] {
-      return ("'" + name.strref() + "' Pipeline").str();
+    auto it = parentTimerIndices.find(parentInfo);
+    if (it != parentTimerIndices.end())
+      parentScope = &activeThreadTimers[parentInfo.parentThreadID][it->second];
+    else
+      parentScope = &rootScope;
+
+    // Use nullptr to anchor op-agnostic pipelines, otherwise use the name of
+    // the operation.
+    const void *timerId = name ? name->getAsOpaquePointer() : nullptr;
+    activeTimers.push_back(parentScope->nest(timerId, [name] {
+      return ("'" + (name ? name->getStringRef() : "any") + "' Pipeline").str();
     }));
   }
 
-  void runAfterPipeline(StringAttr, const PipelineParentInfo &) override {
+  void runAfterPipeline(std::optional<OperationName>,
+                        const PipelineParentInfo &) override {
     auto &activeTimers = activeThreadTimers[llvm::get_threadid()];
     assert(!activeTimers.empty() && "expected active timer");
     activeTimers.pop_back();

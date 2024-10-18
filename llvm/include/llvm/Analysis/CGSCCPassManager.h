@@ -88,27 +88,20 @@
 #ifndef LLVM_ANALYSIS_CGSCCPASSMANAGER_H
 #define LLVM_ANALYSIS_CGSCCPASSMANAGER_H
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/PriorityWorklist.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/LazyCallGraph.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/ValueHandle.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include <algorithm>
 #include <cassert>
 #include <utility>
 
 namespace llvm {
 
+class Function;
+template <typename T, unsigned int N> class SmallPriorityWorklist;
 struct CGSCCUpdateResult;
+
 class Module;
 
 // Allow debug logging in this inline function.
@@ -165,7 +158,7 @@ struct RequireAnalysisPass<AnalysisT, LazyCallGraph::SCC, CGSCCAnalysisManager,
                      function_ref<StringRef(StringRef)> MapClassName2PassName) {
     auto ClassName = AnalysisT::name();
     auto PassName = MapClassName2PassName(ClassName);
-    OS << "require<" << PassName << ">";
+    OS << "require<" << PassName << '>';
   }
 };
 
@@ -236,17 +229,6 @@ using ModuleAnalysisManagerCGSCCProxy =
 /// Passes which do not change the call graph structure in any way can just
 /// ignore this argument to their run method.
 struct CGSCCUpdateResult {
-  /// Worklist of the RefSCCs queued for processing.
-  ///
-  /// When a pass refines the graph and creates new RefSCCs or causes them to
-  /// have a different shape or set of component SCCs it should add the RefSCCs
-  /// to this worklist so that we visit them in the refined form.
-  ///
-  /// This worklist is in reverse post-order, as we pop off the back in order
-  /// to observe RefSCCs in post-order. When adding RefSCCs, clients should add
-  /// them in reverse post-order.
-  SmallPriorityWorklist<LazyCallGraph::RefSCC *, 1> &RCWorklist;
-
   /// Worklist of the SCCs queued for processing.
   ///
   /// When a pass refines the graph and creates new SCCs or causes them to have
@@ -262,14 +244,6 @@ struct CGSCCUpdateResult {
   /// in reverse post-order.
   SmallPriorityWorklist<LazyCallGraph::SCC *, 1> &CWorklist;
 
-  /// The set of invalidated RefSCCs which should be skipped if they are found
-  /// in \c RCWorklist.
-  ///
-  /// This is used to quickly prune out RefSCCs when they get deleted and
-  /// happen to already be on the worklist. We use this primarily to avoid
-  /// scanning the list and removing entries from it.
-  SmallPtrSetImpl<LazyCallGraph::RefSCC *> &InvalidatedRefSCCs;
-
   /// The set of invalidated SCCs which should be skipped if they are found
   /// in \c CWorklist.
   ///
@@ -277,16 +251,6 @@ struct CGSCCUpdateResult {
   /// to already be on the worklist. We use this primarily to avoid scanning
   /// the list and removing entries from it.
   SmallPtrSetImpl<LazyCallGraph::SCC *> &InvalidatedSCCs;
-
-  /// If non-null, the updated current \c RefSCC being processed.
-  ///
-  /// This is set when a graph refinement takes place and the "current" point
-  /// in the graph moves "down" or earlier in the post-order walk. This will
-  /// often cause the "current" RefSCC to be a newly created RefSCC object and
-  /// the old one to be added to the above worklist. When that happens, this
-  /// pointer is non-null and can be used to continue processing the "top" of
-  /// the post-order walk.
-  LazyCallGraph::RefSCC *UpdatedRC;
 
   /// If non-null, the updated current \c SCC being processed.
   ///
@@ -321,6 +285,10 @@ struct CGSCCUpdateResult {
   /// for a better technique.
   SmallDenseSet<std::pair<LazyCallGraph::Node *, LazyCallGraph::SCC *>, 4>
       &InlinedInternalEdges;
+
+  /// Functions that a pass has considered to be dead to be removed at the end
+  /// of the call graph walk in batch.
+  SmallVector<Function *, 4> &DeadFunctions;
 
   /// Weak VHs to keep track of indirect calls for the purposes of detecting
   /// devirtualization.
@@ -373,7 +341,7 @@ public:
                      function_ref<StringRef(StringRef)> MapClassName2PassName) {
     OS << "cgscc(";
     Pass->printPipeline(OS, MapClassName2PassName);
-    OS << ")";
+    OS << ')';
   }
 
   static bool isRequired() { return true; }
@@ -387,9 +355,9 @@ private:
 template <typename CGSCCPassT>
 ModuleToPostOrderCGSCCPassAdaptor
 createModuleToPostOrderCGSCCPassAdaptor(CGSCCPassT &&Pass) {
-  using PassModelT = detail::PassModel<LazyCallGraph::SCC, CGSCCPassT,
-                                       PreservedAnalyses, CGSCCAnalysisManager,
-                                       LazyCallGraph &, CGSCCUpdateResult &>;
+  using PassModelT =
+      detail::PassModel<LazyCallGraph::SCC, CGSCCPassT, CGSCCAnalysisManager,
+                        LazyCallGraph &, CGSCCUpdateResult &>;
   // Do not use make_unique, it causes too many template instantiations,
   // causing terrible compile times.
   return ModuleToPostOrderCGSCCPassAdaptor(
@@ -503,11 +471,19 @@ public:
   void printPipeline(raw_ostream &OS,
                      function_ref<StringRef(StringRef)> MapClassName2PassName) {
     OS << "function";
-    if (EagerlyInvalidate)
-      OS << "<eager-inv>";
-    OS << "(";
+    if (EagerlyInvalidate || NoRerun) {
+      OS << "<";
+      if (EagerlyInvalidate)
+        OS << "eager-inv";
+      if (EagerlyInvalidate && NoRerun)
+        OS << ";";
+      if (NoRerun)
+        OS << "no-rerun";
+      OS << ">";
+    }
+    OS << '(';
     Pass->printPipeline(OS, MapClassName2PassName);
-    OS << ")";
+    OS << ')';
   }
 
   static bool isRequired() { return true; }
@@ -526,8 +502,7 @@ createCGSCCToFunctionPassAdaptor(FunctionPassT &&Pass,
                                  bool EagerlyInvalidate = false,
                                  bool NoRerun = false) {
   using PassModelT =
-      detail::PassModel<Function, FunctionPassT, PreservedAnalyses,
-                        FunctionAnalysisManager>;
+      detail::PassModel<Function, FunctionPassT, FunctionAnalysisManager>;
   // Do not use make_unique, it causes too many template instantiations,
   // causing terrible compile times.
   return CGSCCToFunctionPassAdaptor(
@@ -583,7 +558,7 @@ public:
                      function_ref<StringRef(StringRef)> MapClassName2PassName) {
     OS << "devirt<" << MaxIterations << ">(";
     Pass->printPipeline(OS, MapClassName2PassName);
-    OS << ")";
+    OS << ')';
   }
 
 private:
@@ -596,9 +571,9 @@ private:
 template <typename CGSCCPassT>
 DevirtSCCRepeatedPass createDevirtSCCRepeatedPass(CGSCCPassT &&Pass,
                                                   int MaxIterations) {
-  using PassModelT = detail::PassModel<LazyCallGraph::SCC, CGSCCPassT,
-                                       PreservedAnalyses, CGSCCAnalysisManager,
-                                       LazyCallGraph &, CGSCCUpdateResult &>;
+  using PassModelT =
+      detail::PassModel<LazyCallGraph::SCC, CGSCCPassT, CGSCCAnalysisManager,
+                        LazyCallGraph &, CGSCCUpdateResult &>;
   // Do not use make_unique, it causes too many template instantiations,
   // causing terrible compile times.
   return DevirtSCCRepeatedPass(

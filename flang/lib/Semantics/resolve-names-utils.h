@@ -44,17 +44,12 @@ class SemanticsContext;
 Symbol &Resolve(const parser::Name &, Symbol &);
 Symbol *Resolve(const parser::Name &, Symbol *);
 
-// Create a copy of msg with a new isFatal value.
-parser::MessageFixedText WithIsFatal(
-    const parser::MessageFixedText &msg, bool isFatal);
+// Create a copy of msg with a new severity.
+parser::MessageFixedText WithSeverity(
+    const parser::MessageFixedText &msg, parser::Severity);
 
 bool IsIntrinsicOperator(const SemanticsContext &, const SourceName &);
 bool IsLogicalConstant(const SemanticsContext &, const SourceName &);
-
-// Some intrinsic operators have more than one name (e.g. `operator(.eq.)` and
-// `operator(==)`). GetAllNames() returns them all, including symbolName.
-std::forward_list<std::string> GetAllNames(
-    const SemanticsContext &, const SourceName &);
 
 template <typename T>
 MaybeIntExpr EvaluateIntExpr(SemanticsContext &context, const T &expr) {
@@ -128,8 +123,9 @@ private:
   bool CheckSubstringBound(const parser::Expr &, bool);
   bool IsCharacterSequenceType(const DeclTypeSpec *);
   bool IsDefaultKindNumericType(const IntrinsicTypeSpec &);
-  bool IsNumericSequenceType(const DeclTypeSpec *);
-  bool IsSequenceType(
+  bool IsDefaultNumericSequenceType(const DeclTypeSpec *);
+  static bool IsAnyNumericSequenceType(const DeclTypeSpec *);
+  static bool IsSequenceType(
       const DeclTypeSpec *, std::function<bool(const IntrinsicTypeSpec &)>);
 
   SemanticsContext &context_;
@@ -143,6 +139,12 @@ private:
     std::optional<ConstantSubscript> substringStart;
   } currObject_; // equivalence object currently being constructed
 };
+
+// Duplicates a subprogram's dummy arguments and result, if any, and
+// maps all of the symbols in their expressions.
+struct SymbolAndTypeMappings;
+void MapSubprogramToNewSymbols(const Symbol &oldSymbol, Symbol &newSymbol,
+    Scope &newScope, SymbolAndTypeMappings * = nullptr);
 
 } // namespace Fortran::semantics
 #endif // FORTRAN_SEMANTICS_RESOLVE_NAMES_H_

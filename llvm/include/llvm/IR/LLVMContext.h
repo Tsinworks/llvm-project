@@ -19,6 +19,7 @@
 #include "llvm/Support/CBindingWrapping.h"
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace llvm {
@@ -32,11 +33,9 @@ class Module;
 class OptPassGate;
 template <typename T> class SmallVectorImpl;
 template <typename T> class StringMapEntry;
-class SMDiagnostic;
 class StringRef;
 class Twine;
 class LLVMRemarkStreamer;
-class raw_ostream;
 
 namespace remarks {
 class RemarkStreamer;
@@ -69,7 +68,7 @@ class LLVMContext {
 public:
   LLVMContextImpl *const pImpl;
   LLVMContext();
-  LLVMContext(LLVMContext &) = delete;
+  LLVMContext(const LLVMContext &) = delete;
   LLVMContext &operator=(const LLVMContext &) = delete;
   ~LLVMContext();
 
@@ -94,6 +93,9 @@ public:
     OB_preallocated = 4,           // "preallocated"
     OB_gc_live = 5,                // "gc-live"
     OB_clang_arc_attachedcall = 6, // "clang.arc.attachedcall"
+    OB_ptrauth = 7,                // "ptrauth"
+    OB_kcfi = 8,                   // "kcfi"
+    OB_convergencectrl = 9,        // "convergencectrl"
   };
 
   /// getMDKindID - Return a unique non-zero ID for the specified metadata kind.
@@ -128,6 +130,10 @@ public:
   /// scope names are ordered by increasing synchronization scope IDs.
   void getSyncScopeNames(SmallVectorImpl<StringRef> &SSNs) const;
 
+  /// getSyncScopeName - Returns the name of a SyncScope::ID
+  /// registered with LLVMContext, if any.
+  std::optional<StringRef> getSyncScopeName(SyncScope::ID Id) const;
+
   /// Define the GC for a function
   void setGC(const Function &Fn, std::string GCName);
 
@@ -152,6 +158,10 @@ public:
   bool isODRUniquingDebugTypes() const;
   void enableDebugTypeODRUniquing();
   void disableDebugTypeODRUniquing();
+
+  /// generateMachineFunctionNum - Get a unique number for MachineFunction
+  /// that associated with the given Function.
+  unsigned generateMachineFunctionNum(Function &);
 
   /// Defines the type of a yield callback.
   /// \see LLVMContext::setYieldCallback.
@@ -202,6 +212,11 @@ public:
   /// diagnostics.
   void setDiagnosticsHotnessRequested(bool Requested);
 
+  bool getMisExpectWarningRequested() const;
+  void setMisExpectWarningRequested(bool Requested);
+  void setDiagnosticsMisExpectTolerance(std::optional<uint32_t> Tolerance);
+  uint32_t getDiagnosticsMisExpectTolerance() const;
+
   /// Return the minimum hotness value a diagnostic would need in order
   /// to be included in optimization diagnostics.
   ///
@@ -216,7 +231,7 @@ public:
 
   /// Set the minimum hotness value a diagnostic needs in order to be
   /// included in optimization diagnostics.
-  void setDiagnosticsHotnessThreshold(Optional<uint64_t> Threshold);
+  void setDiagnosticsHotnessThreshold(std::optional<uint64_t> Threshold);
 
   /// Return if hotness threshold is requested from PSI.
   bool isDiagnosticsHotnessThresholdSetFromPSI() const;
@@ -305,12 +320,21 @@ public:
   /// LLVMContext is used by compilation.
   void setOptPassGate(OptPassGate&);
 
-  /// Enable opaque pointers. Can only be called before creating the first
-  /// pointer type.
-  void enableOpaquePointers() const;
+  /// Get or set the current "default" target CPU (target-cpu function
+  /// attribute). The intent is that compiler frontends will set this to a value
+  /// that reflects the attribute that a function would get "by default" without
+  /// any specific function attributes, and compiler passes will attach the
+  /// attribute to newly created functions that are not associated with a
+  /// particular function, such as global initializers.
+  /// Function::createWithDefaultAttr() will create functions with this
+  /// attribute. This function should only be called by passes that run at
+  /// compile time and not by the backend or LTO passes.
+  StringRef getDefaultTargetCPU();
+  void setDefaultTargetCPU(StringRef CPU);
 
-  /// Whether typed pointers are supported. If false, all pointers are opaque.
-  bool supportsTypedPointers() const;
+  /// Similar to {get,set}DefaultTargetCPU() but for default target-features.
+  StringRef getDefaultTargetFeatures();
+  void setDefaultTargetFeatures(StringRef Features);
 
 private:
   // Module needs access to the add/removeModule methods.
@@ -321,7 +345,7 @@ private:
   void addModule(Module*);
 
   /// removeModule - Unregister a module from this context.
-  void removeModule(Module*);
+  void removeModule(Module *);
 };
 
 // Create wrappers for C Binding types (see CBindingWrapping.h).

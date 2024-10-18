@@ -24,35 +24,36 @@ using namespace llvm;
 // Static Analyzer Checkers Tables generation
 //===----------------------------------------------------------------------===//
 
-static std::string getPackageFullName(const Record *R);
+static std::string getPackageFullName(const Record *R, StringRef Sep = ".");
 
-static std::string getParentPackageFullName(const Record *R) {
+static std::string getParentPackageFullName(const Record *R,
+                                            StringRef Sep = ".") {
   std::string name;
-  if (DefInit *DI = dyn_cast<DefInit>(R->getValueInit("ParentPackage")))
-    name = getPackageFullName(DI->getDef());
+  if (const DefInit *DI = dyn_cast<DefInit>(R->getValueInit("ParentPackage")))
+    name = getPackageFullName(DI->getDef(), Sep);
   return name;
 }
 
-static std::string getPackageFullName(const Record *R) {
-  std::string name = getParentPackageFullName(R);
+static std::string getPackageFullName(const Record *R, StringRef Sep) {
+  std::string name = getParentPackageFullName(R, Sep);
   if (!name.empty())
-    name += ".";
+    name += Sep;
   assert(!R->getValueAsString("PackageName").empty());
   name += R->getValueAsString("PackageName");
   return name;
 }
 
-static std::string getCheckerFullName(const Record *R) {
-  std::string name = getParentPackageFullName(R);
+static std::string getCheckerFullName(const Record *R, StringRef Sep = ".") {
+  std::string name = getParentPackageFullName(R, Sep);
   if (!name.empty())
-    name += ".";
+    name += Sep;
   assert(!R->getValueAsString("CheckerName").empty());
   name += R->getValueAsString("CheckerName");
   return name;
 }
 
 static std::string getStringValue(const Record &R, StringRef field) {
-  if (StringInit *SI = dyn_cast<StringInit>(R.getValueInit(field)))
+  if (const StringInit *SI = dyn_cast<StringInit>(R.getValueInit(field)))
     return std::string(SI->getValue());
   return std::string();
 }
@@ -74,20 +75,18 @@ static inline uint64_t getValueFromBitsInit(const BitsInit *B, const Record &R) 
 }
 
 static std::string getCheckerDocs(const Record &R) {
-  StringRef LandingPage;
-  if (BitsInit *BI = R.getValueAsBitsInit("Documentation")) {
-    uint64_t V = getValueFromBitsInit(BI, R);
-    if (V == 1)
-      LandingPage = "available_checks.html";
-    else if (V == 2)
-      LandingPage = "alpha_checks.html";
-  }
-  
-  if (LandingPage.empty())
+  const BitsInit *BI = R.getValueAsBitsInit("Documentation");
+  if (!BI)
+    PrintFatalError(R.getLoc(), "missing Documentation<...> member for " +
+                                    getCheckerFullName(&R));
+
+  // Ignore 'Documentation<NotDocumented>' checkers.
+  if (getValueFromBitsInit(BI, R) == 0)
     return "";
 
-  return (llvm::Twine("https://clang-analyzer.llvm.org/") + LandingPage + "#" +
-          getCheckerFullName(&R))
+  std::string CheckerFullName = StringRef(getCheckerFullName(&R, "-")).lower();
+  return (Twine("https://clang.llvm.org/docs/analyzer/checkers.html#") +
+          CheckerFullName)
       .str();
 }
 
@@ -95,7 +94,7 @@ static std::string getCheckerDocs(const Record &R) {
 /// the class itself has to be modified for adding a new option type in
 /// CheckerBase.td.
 static std::string getCheckerOptionType(const Record &R) {
-  if (BitsInit *BI = R.getValueAsBitsInit("Type")) {
+  if (const BitsInit *BI = R.getValueAsBitsInit("Type")) {
     switch(getValueFromBitsInit(BI, R)) {
     case 0:
       return "int";
@@ -112,7 +111,7 @@ static std::string getCheckerOptionType(const Record &R) {
 }
 
 static std::string getDevelopmentStage(const Record &R) {
-  if (BitsInit *BI = R.getValueAsBitsInit("DevelopmentStage")) {
+  if (const BitsInit *BI = R.getValueAsBitsInit("DevelopmentStage")) {
     switch(getValueFromBitsInit(BI, R)) {
     case 0:
       return "alpha";
@@ -132,13 +131,13 @@ static bool isHidden(const Record *R) {
     return true;
 
   // Not declared as hidden, check the parent package if it is hidden.
-  if (DefInit *DI = dyn_cast<DefInit>(R->getValueInit("ParentPackage")))
+  if (const DefInit *DI = dyn_cast<DefInit>(R->getValueInit("ParentPackage")))
     return isHidden(DI->getDef());
 
   return false;
 }
 
-static void printChecker(llvm::raw_ostream &OS, const Record &R) {
+static void printChecker(raw_ostream &OS, const Record &R) {
   OS << "CHECKER(" << "\"";
   OS.write_escaped(getCheckerFullName(&R)) << "\", ";
   OS << R.getName() << ", ";
@@ -156,8 +155,7 @@ static void printChecker(llvm::raw_ostream &OS, const Record &R) {
   OS << ")\n";
 }
 
-static void printOption(llvm::raw_ostream &OS, StringRef FullName,
-                        const Record &R) {
+static void printOption(raw_ostream &OS, StringRef FullName, const Record &R) {
   OS << "\"";
   OS.write_escaped(getCheckerOptionType(R)) << "\", \"";
   OS.write_escaped(FullName) << "\", ";
@@ -175,11 +173,13 @@ static void printOption(llvm::raw_ostream &OS, StringRef FullName,
     OS << "true";
 }
 
-void clang::EmitClangSACheckers(RecordKeeper &Records, raw_ostream &OS) {
-  std::vector<Record*> checkers = Records.getAllDerivedDefinitions("Checker");
-  std::vector<Record*> packages = Records.getAllDerivedDefinitions("Package");
+void clang::EmitClangSACheckers(const RecordKeeper &Records, raw_ostream &OS) {
+  ArrayRef<const Record *> checkers =
+      Records.getAllDerivedDefinitions("Checker");
+  ArrayRef<const Record *> packages =
+      Records.getAllDerivedDefinitions("Package");
 
-  using SortedRecords = llvm::StringMap<const Record *>;
+  using SortedRecords = StringMap<const Record *>;
 
   OS << "// This file is automatically generated. Do not edit this file by "
         "hand.\n";
@@ -220,7 +220,7 @@ void clang::EmitClangSACheckers(RecordKeeper &Records, raw_ostream &OS) {
   //   - DESCRIPTION
   //   - DEFAULT: The default value for this option.
   //
-  // The full option can be specified in the command like like this:
+  // The full option can be specified in the command like this:
   //   -analyzer-config PACKAGENAME:OPTIONNAME=VALUE
   OS << "\n"
         "#ifdef GET_PACKAGE_OPTIONS\n";
@@ -229,9 +229,8 @@ void clang::EmitClangSACheckers(RecordKeeper &Records, raw_ostream &OS) {
     if (Package->isValueUnset("PackageOptions"))
       continue;
 
-    std::vector<Record *> PackageOptions = Package
-                                       ->getValueAsListOfDefs("PackageOptions");
-    for (Record *PackageOpt : PackageOptions) {
+    for (const Record *PackageOpt :
+         Package->getValueAsListOfDefs("PackageOptions")) {
       OS << "PACKAGE_OPTION(";
       printOption(OS, getPackageFullName(Package), *PackageOpt);
       OS << ")\n";
@@ -320,18 +319,16 @@ void clang::EmitClangSACheckers(RecordKeeper &Records, raw_ostream &OS) {
   //   - DESCRIPTION
   //   - DEFAULT: The default value for this option.
   //
-  // The full option can be specified in the command like like this:
+  // The full option can be specified in the command like this:
   //   -analyzer-config CHECKERNAME:OPTIONNAME=VALUE
   OS << "\n"
         "#ifdef GET_CHECKER_OPTIONS\n";
   for (const Record *Checker : checkers) {
-
     if (Checker->isValueUnset("CheckerOptions"))
       continue;
 
-    std::vector<Record *> CheckerOptions = Checker
-                                       ->getValueAsListOfDefs("CheckerOptions");
-    for (Record *CheckerOpt : CheckerOptions) {
+    for (const Record *CheckerOpt :
+         Checker->getValueAsListOfDefs("CheckerOptions")) {
       OS << "CHECKER_OPTION(";
       printOption(OS, getCheckerFullName(Checker), *CheckerOpt);
       OS << ")\n";

@@ -1,5 +1,7 @@
 ; RUN: %llc_dwarf -O0 -filetype=obj < %s | llvm-dwarfdump - | FileCheck --implicit-check-not "{{DW_TAG|NULL}}" %s
 
+; RUN: %llc_dwarf --try-experimental-debuginfo-iterators -O0 -filetype=obj < %s | llvm-dwarfdump - | FileCheck --implicit-check-not "{{DW_TAG|NULL}}" %s
+
 ; namespace ns {
 ; inline __attribute__((always_inline))
 ; void foo() { int a = 4; }
@@ -37,8 +39,8 @@
 define dso_local void @_Z3goov() !dbg !4 {
 entry:
   %a.i = alloca i32, align 4
-  call void @llvm.dbg.declare(metadata i32* %a.i, metadata !16, metadata !DIExpression()), !dbg !18
-  store i32 4, i32* %a.i, align 4, !dbg !18
+  call void @llvm.dbg.declare(metadata ptr %a.i, metadata !16, metadata !DIExpression()), !dbg !18
+  store i32 4, ptr %a.i, align 4, !dbg !18
   ret void, !dbg !20
 }
 
@@ -49,11 +51,11 @@ declare void @llvm.dbg.declare(metadata, metadata, metadata)
 !llvm.module.flags = !{!10, !11, !12, !13, !14}
 !llvm.ident = !{!15}
 
-!0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !1, producer: "clang version 14.0.0", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, imports: !2, splitDebugInlining: false, nameTableKind: None)
+!0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !1, producer: "clang version 14.0.0", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
 !1 = !DIFile(filename: "imported-inlined-declaration.cpp", directory: "")
 !2 = !{!3}
 !3 = !DIImportedEntity(tag: DW_TAG_imported_declaration, scope: !4, entity: !8, file: !1, line: 7)
-!4 = distinct !DISubprogram(name: "goo", linkageName: "_Z3goov", scope: !1, file: !1, line: 6, type: !5, scopeLine: 6, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !7)
+!4 = distinct !DISubprogram(name: "goo", linkageName: "_Z3goov", scope: !1, file: !1, line: 6, type: !5, scopeLine: 6, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !2)
 !5 = !DISubroutineType(types: !6)
 !6 = !{null}
 !7 = !{}

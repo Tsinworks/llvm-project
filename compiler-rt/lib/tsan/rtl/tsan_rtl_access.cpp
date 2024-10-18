@@ -145,18 +145,9 @@ void TraceTime(ThreadState* thr) {
   TraceEvent(thr, ev);
 }
 
-ALWAYS_INLINE RawShadow LoadShadow(RawShadow* p) {
-  return static_cast<RawShadow>(
-      atomic_load((atomic_uint32_t*)p, memory_order_relaxed));
-}
-
-ALWAYS_INLINE void StoreShadow(RawShadow* sp, RawShadow s) {
-  atomic_store((atomic_uint32_t*)sp, static_cast<u32>(s), memory_order_relaxed);
-}
-
 NOINLINE void DoReportRace(ThreadState* thr, RawShadow* shadow_mem, Shadow cur,
                            Shadow old,
-                           AccessType typ) NO_THREAD_SAFETY_ANALYSIS {
+                           AccessType typ) SANITIZER_NO_THREAD_SAFETY_ANALYSIS {
   // For the free shadow markers the first element (that contains kFreeSid)
   // triggers the race, but the second element contains info about the freeing
   // thread, take it.
@@ -170,10 +161,10 @@ NOINLINE void DoReportRace(ThreadState* thr, RawShadow* shadow_mem, Shadow cur,
   // the slot locked because of the fork. But MemoryRangeFreed is not
   // called during fork because fork sets ignore_reads_and_writes,
   // so simply unlocking the slot should be fine.
-  if (typ & kAccessFree)
+  if (typ & kAccessSlotLocked)
     SlotUnlock(thr);
   ReportRace(thr, shadow_mem, cur, Shadow(old), typ);
-  if (typ & kAccessFree)
+  if (typ & kAccessSlotLocked)
     SlotLock(thr);
 }
 
@@ -451,6 +442,44 @@ ALWAYS_INLINE USED void MemoryAccess(ThreadState* thr, uptr pc, uptr addr,
   CheckRaces(thr, shadow_mem, cur, shadow, access, typ);
 }
 
+void MemoryAccess16(ThreadState* thr, uptr pc, uptr addr, AccessType typ);
+
+NOINLINE
+void RestartMemoryAccess16(ThreadState* thr, uptr pc, uptr addr,
+                           AccessType typ) {
+  TraceSwitchPart(thr);
+  MemoryAccess16(thr, pc, addr, typ);
+}
+
+ALWAYS_INLINE USED void MemoryAccess16(ThreadState* thr, uptr pc, uptr addr,
+                                       AccessType typ) {
+  const uptr size = 16;
+  FastState fast_state = thr->fast_state;
+  if (UNLIKELY(fast_state.GetIgnoreBit()))
+    return;
+  Shadow cur(fast_state, 0, 8, typ);
+  RawShadow* shadow_mem = MemToShadow(addr);
+  bool traced = false;
+  {
+    LOAD_CURRENT_SHADOW(cur, shadow_mem);
+    if (LIKELY(ContainsSameAccess(shadow_mem, cur, shadow, access, typ)))
+      goto SECOND;
+    if (!TryTraceMemoryAccessRange(thr, pc, addr, size, typ))
+      return RestartMemoryAccess16(thr, pc, addr, typ);
+    traced = true;
+    if (UNLIKELY(CheckRaces(thr, shadow_mem, cur, shadow, access, typ)))
+      return;
+  }
+SECOND:
+  shadow_mem += kShadowCnt;
+  LOAD_CURRENT_SHADOW(cur, shadow_mem);
+  if (LIKELY(ContainsSameAccess(shadow_mem, cur, shadow, access, typ)))
+    return;
+  if (!traced && !TryTraceMemoryAccessRange(thr, pc, addr, size, typ))
+    return RestartMemoryAccess16(thr, pc, addr, typ);
+  CheckRaces(thr, shadow_mem, cur, shadow, access, typ);
+}
+
 NOINLINE
 void RestartUnalignedMemoryAccess(ThreadState* thr, uptr pc, uptr addr,
                                   uptr size, AccessType typ) {
@@ -573,8 +602,8 @@ void MemoryRangeFreed(ThreadState* thr, uptr pc, uptr addr, uptr size) {
   // can cause excessive memory consumption (user does not necessary touch
   // the whole range) and most likely unnecessary.
   size = Min<uptr>(size, 1024);
-  const AccessType typ =
-      kAccessWrite | kAccessFree | kAccessCheckOnly | kAccessNoRodata;
+  const AccessType typ = kAccessWrite | kAccessFree | kAccessSlotLocked |
+                         kAccessCheckOnly | kAccessNoRodata;
   TraceMemoryAccessRange(thr, pc, addr, size, typ);
   RawShadow* shadow_mem = MemToShadow(addr);
   Shadow cur(thr->fast_state, 0, kShadowCell, typ);
@@ -643,22 +672,28 @@ void MemoryAccessRangeT(ThreadState* thr, uptr pc, uptr addr, uptr size) {
 
 #if SANITIZER_DEBUG
   if (!IsAppMem(addr)) {
-    Printf("Access to non app mem %zx\n", addr);
+    Printf("Access to non app mem start: %p\n", (void*)addr);
     DCHECK(IsAppMem(addr));
   }
   if (!IsAppMem(addr + size - 1)) {
-    Printf("Access to non app mem %zx\n", addr + size - 1);
+    Printf("Access to non app mem end: %p\n", (void*)(addr + size - 1));
     DCHECK(IsAppMem(addr + size - 1));
   }
   if (!IsShadowMem(shadow_mem)) {
-    Printf("Bad shadow addr %p (%zx)\n", static_cast<void*>(shadow_mem), addr);
+    Printf("Bad shadow start addr: %p (%p)\n", shadow_mem, (void*)addr);
     DCHECK(IsShadowMem(shadow_mem));
   }
-  if (!IsShadowMem(shadow_mem + size * kShadowCnt - 1)) {
-    Printf("Bad shadow addr %p (%zx)\n",
-           static_cast<void*>(shadow_mem + size * kShadowCnt - 1),
-           addr + size - 1);
-    DCHECK(IsShadowMem(shadow_mem + size * kShadowCnt - 1));
+
+  RawShadow* shadow_mem_end = reinterpret_cast<RawShadow*>(
+      reinterpret_cast<uptr>(shadow_mem) + size * kShadowMultiplier - 1);
+  if (!IsShadowMem(shadow_mem_end)) {
+    Printf("Bad shadow end addr: %p (%p)\n", shadow_mem_end,
+           (void*)(addr + size - 1));
+    Printf(
+        "Shadow start addr (ok): %p (%p); size: 0x%zx; kShadowMultiplier: "
+        "%zx\n",
+        shadow_mem, (void*)addr, size, kShadowMultiplier);
+    DCHECK(IsShadowMem(shadow_mem_end));
   }
 #endif
 

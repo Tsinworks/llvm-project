@@ -35,12 +35,12 @@
 ; Check that there are no verifier failures, and that the SP for "main" appears
 ; in the correct CU.
 ; CHECK-LABEL:      DW_TAG_compile_unit
+; CHECK:              DW_AT_name ("1.cpp")
+; CHECK-NOT:          DW_AT_name ("main")
+; CHECK-LABEL:      DW_TAG_compile_unit
 ; CHECK:              DW_AT_name ("2.cpp")
 ; CHECK:            DW_TAG_subprogram
 ; CHECK:              DW_AT_name ("main")
-; CHECK-LABEL:      DW_TAG_compile_unit
-; CHECK:              DW_AT_name ("1.cpp")
-; CHECK-NOT:          DW_AT_name ("main")
 
 source_filename = "ld-temp.o"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
@@ -61,7 +61,7 @@ entry:
 
 !llvm.dbg.cu = !{!0, !9}
 !llvm.ident = !{!10, !10}
-!llvm.module.flags = !{!11, !12, !13, !14, !15, !16}
+!llvm.module.flags = !{!11, !12, !13, !14, !15}
 
 !0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !1, producer: "clang version 12.0.0 (git@github.com:llvm/llvm-project bc9ab9a5cd6bafc5e1293f3d5d51638f8f5cd26c)", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, enums: !2, globals: !3, splitDebugInlining: false, nameTableKind: None)
 !1 = !DIFile(filename: "1.cpp", directory: "/tmp/bees")
@@ -79,7 +79,6 @@ entry:
 !13 = !{i32 1, !"wchar_size", i32 4}
 !14 = !{i32 1, !"ThinLTO", i32 0}
 !15 = !{i32 1, !"EnableSplitLTOUnit", i32 1}
-!16 = !{i32 1, !"LTOPostLink", i32 1}
 !17 = distinct !DISubprogram(name: "main", scope: !8, file: !8, line: 10, type: !18, scopeLine: 10, flags: DIFlagPrototyped | DIFlagAllCallsDescribed, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !9, retainedNodes: !2)
 !18 = !DISubroutineType(types: !19)
 !19 = !{!20}

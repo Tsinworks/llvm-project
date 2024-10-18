@@ -5,32 +5,32 @@
 
 # RUN: ld.lld -shared -z now %t.o %t1.o -o %t.so
 # RUN: llvm-readobj -r -x .got %t.so | FileCheck --check-prefix=GD-REL %s
-# RUN: llvm-objdump -h -d --no-show-raw-insn %t.so | FileCheck --check-prefix=GD %s
+# RUN: llvm-objdump --no-print-imm-hex -h -d --no-show-raw-insn %t.so | FileCheck --check-prefix=GD %s
 
 # RUN: ld.lld -shared -z now %t.o %t1.o -o %t-rela.so -z rela
 # RUN: llvm-readobj -r -x .got %t-rela.so | FileCheck --check-prefix=GD-RELA %s
 
 # RUN: ld.lld -z now %t.o %t1.o -o %t
 # RUN: llvm-readelf -r %t | FileCheck --check-prefix=NOREL %s
-# RUN: llvm-objdump -h -d --no-show-raw-insn %t | FileCheck --check-prefix=LE %s
+# RUN: llvm-objdump --no-print-imm-hex -h -d --no-show-raw-insn %t | FileCheck --check-prefix=LE %s
 
 # RUN: ld.lld -z now %t.o %t1.so -o %t
 # RUN: llvm-readobj -r %t | FileCheck --check-prefix=IE-REL %s
-# RUN: llvm-objdump -h -d --no-show-raw-insn %t | FileCheck --check-prefix=IE %s
+# RUN: llvm-objdump --no-print-imm-hex -h -d --no-show-raw-insn %t | FileCheck --check-prefix=IE %s
 
 # GD-REL:      .rel.dyn {
-# GD-REL-NEXT:   0x2250 R_386_TLS_DESC -
+# GD-REL-NEXT:   0x2258 R_386_TLS_DESC -
 # GD-REL-NEXT:   0x2248 R_386_TLS_DESC a
-# GD-REL-NEXT:   0x2258 R_386_TLS_DESC c
+# GD-REL-NEXT:   0x2250 R_386_TLS_DESC c
 # GD-REL-NEXT: }
 # GD-REL:      Hex dump of section '.got':
-# GD-REL-NEXT: 0x00002248 00000000 00000000 00000000 0b000000
-# GD-REL-NEXT: 0x00002258 00000000 00000000
+# GD-REL-NEXT: 0x00002248 00000000 00000000 00000000 00000000
+# GD-REL-NEXT: 0x00002258 00000000 0b000000
 
 # GD-RELA:      .rela.dyn {
-# GD-RELA-NEXT:   0x225C R_386_TLS_DESC - 0xB
+# GD-RELA-NEXT:   0x2264 R_386_TLS_DESC - 0xB
 # GD-RELA-NEXT:   0x2254 R_386_TLS_DESC a 0x0
-# GD-RELA-NEXT:   0x2264 R_386_TLS_DESC c 0x0
+# GD-RELA-NEXT:   0x225C R_386_TLS_DESC c 0x0
 # GD-RELA-NEXT: }
 # GD-RELA:      Hex dump of section '.got':
 # GD-RELA-NEXT: 0x00002254 00000000 00000000 00000000 00000000
@@ -44,14 +44,14 @@
 # GD-NEXT: calll *(%eax)
 # GD-NEXT: movl %gs:(%eax), %eax
 
-# &.rel.dyn[b]-.got.plt = 0x2250-0x2260 = -16
-# GD-NEXT: leal -16(%ebx), %eax
+# &.rel.dyn[b]-.got.plt = 0x2258-0x2260 = -8
+# GD-NEXT: leal -8(%ebx), %eax
 # GD-NEXT: movl %edx, %ebx
 # GD-NEXT: calll *(%eax)
 # GD-NEXT: movl %gs:(%eax), %eax
 
-# &.rel.dyn[c]-.got.plt = 0x2258-0x2260 = -8
-# GD-NEXT: leal -8(%ebx), %eax
+# &.rel.dyn[c]-.got.plt = 0x2250-0x2260 = -16
+# GD-NEXT: leal -16(%ebx), %eax
 # GD-NEXT: calll *(%eax)
 # GD-NEXT: movl %gs:(%eax), %eax
 

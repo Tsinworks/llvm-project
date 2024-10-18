@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
+///
 /// \file
 /// \brief Find all cycles in a control-flow graph, including irreducible loops.
 ///
@@ -22,27 +22,23 @@
 ///   unique cycle C which is a superset of L.
 /// - In the absence of irreducible control flow, the cycles are
 ///   exactly the natural loops in the program.
-//
+///
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_ADT_GENERICCYCLEINFO_H
 #define LLVM_ADT_GENERICCYCLEINFO_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/GenericSSAContext.h"
 #include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/iterator.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Printable.h"
 #include "llvm/Support/raw_ostream.h"
-#include <vector>
 
 namespace llvm {
 
-template <typename ContexT> class GenericCycleInfo;
-template <typename ContexT> class GenericCycleInfoCompute;
+template <typename ContextT> class GenericCycleInfo;
+template <typename ContextT> class GenericCycleInfoCompute;
 
 /// A possibly irreducible generalization of a \ref Loop.
 template <typename ContextT> class GenericCycle {
@@ -67,7 +63,9 @@ private:
 
   /// Basic blocks that are contained in the cycle, including entry blocks,
   /// and including blocks that are part of a child cycle.
-  std::vector<BlockT *> Blocks;
+  using BlockSetVectorT = SetVector<BlockT *, SmallVector<BlockT *, 8>,
+                                    DenseSet<const BlockT *>, 8>;
+  BlockSetVectorT Blocks;
 
   /// Depth of the cycle in the tree. The root "cycle" is at depth 0.
   ///
@@ -85,7 +83,7 @@ private:
   }
 
   void appendEntry(BlockT *Block) { Entries.push_back(Block); }
-  void appendBlock(BlockT *Block) { Blocks.push_back(Block); }
+  void appendBlock(BlockT *Block) { Blocks.insert(Block); }
 
   GenericCycle(const GenericCycle &) = delete;
   GenericCycle &operator=(const GenericCycle &) = delete;
@@ -100,13 +98,24 @@ public:
 
   BlockT *getHeader() const { return Entries[0]; }
 
+  const SmallVectorImpl<BlockT *> & getEntries() const {
+    return Entries;
+  }
+
   /// \brief Return whether \p Block is an entry block of the cycle.
-  bool isEntry(BlockT *Block) const { return is_contained(Entries, Block); }
+  bool isEntry(const BlockT *Block) const {
+    return is_contained(Entries, Block);
+  }
+
+  /// \brief Replace all entries with \p Block as single entry.
+  void setSingleEntry(BlockT *Block) {
+    assert(contains(Block));
+    Entries.clear();
+    Entries.push_back(Block);
+  }
 
   /// \brief Return whether \p Block is contained in the cycle.
-  bool contains(const BlockT *Block) const {
-    return is_contained(Blocks, Block);
-  }
+  bool contains(const BlockT *Block) const { return Blocks.contains(Block); }
 
   /// \brief Returns true iff this cycle contains \p C.
   ///
@@ -123,6 +132,23 @@ public:
   /// These are the blocks _outside of the current cycle_ which are
   /// branched to.
   void getExitBlocks(SmallVectorImpl<BlockT *> &TmpStorage) const;
+
+  /// Return all blocks of this cycle that have successor outside of this cycle.
+  /// These blocks have cycle exit branch.
+  void getExitingBlocks(SmallVectorImpl<BlockT *> &TmpStorage) const;
+
+  /// Return the preheader block for this cycle. Pre-header is well-defined for
+  /// reducible cycle in docs/LoopTerminology.rst as: the only one entering
+  /// block and its only edge is to the entry block. Return null for irreducible
+  /// cycles.
+  BlockT *getCyclePreheader() const;
+
+  /// If the cycle has exactly one entry with exactly one predecessor, return
+  /// it, otherwise return nullptr.
+  BlockT *getCyclePredecessor() const;
+
+  void verifyCycle() const;
+  void verifyCycleNest() const;
 
   /// Iteration over child cycles.
   //@{
@@ -155,7 +181,7 @@ public:
 
   /// Iteration over blocks in the cycle (including entry blocks).
   //@{
-  using const_block_iterator = typename std::vector<BlockT *>::const_iterator;
+  using const_block_iterator = typename BlockSetVectorT::const_iterator;
 
   const_block_iterator block_begin() const {
     return const_block_iterator{Blocks.begin()};
@@ -173,11 +199,17 @@ public:
   //@{
   using const_entry_iterator =
       typename SmallVectorImpl<BlockT *>::const_iterator;
-
+  const_entry_iterator entry_begin() const { return Entries.begin(); }
+  const_entry_iterator entry_end() const { return Entries.end(); }
   size_t getNumEntries() const { return Entries.size(); }
   iterator_range<const_entry_iterator> entries() const {
-    return llvm::make_range(Entries.begin(), Entries.end());
+    return llvm::make_range(entry_begin(), entry_end());
   }
+  using const_reverse_entry_iterator =
+      typename SmallVectorImpl<BlockT *>::const_reverse_iterator;
+  const_reverse_entry_iterator entry_rbegin() const { return Entries.rbegin(); }
+  const_reverse_entry_iterator entry_rend() const { return Entries.rend(); }
+  //@}
 
   Printable printEntries(const ContextT &Ctx) const {
     return Printable([this, &Ctx](raw_ostream &Out) {
@@ -217,14 +249,23 @@ public:
 private:
   ContextT Context;
 
-  /// Map basic blocks to their inner-most containing loop.
+  /// Map basic blocks to their inner-most containing cycle.
   DenseMap<BlockT *, CycleT *> BlockMap;
 
-  /// Outermost cycles discovered by any DFS.
+  /// Map basic blocks to their top level containing cycle.
+  DenseMap<BlockT *, CycleT *> BlockMapTopLevel;
+
+  /// Top-level cycles discovered by any DFS.
   ///
   /// Note: The implementation treats the nullptr as the parent of
   /// every top-level cycle. See \ref contains for an example.
   std::vector<std::unique_ptr<CycleT>> TopLevelCycles;
+
+  /// Move \p Child to \p NewParent by manipulating Children vectors.
+  ///
+  /// Note: This is an incomplete operation that does not update the depth of
+  /// the subtree.
+  void moveTopLevelCycleToNewParent(CycleT *NewParent, CycleT *Child);
 
 public:
   GenericCycleInfo() = default;
@@ -233,24 +274,29 @@ public:
 
   void clear();
   void compute(FunctionT &F);
+  void splitCriticalEdge(BlockT *Pred, BlockT *Succ, BlockT *New);
 
-  FunctionT *getFunction() const { return Context.getFunction(); }
+  const FunctionT *getFunction() const { return Context.getFunction(); }
   const ContextT &getSSAContext() const { return Context; }
 
   CycleT *getCycle(const BlockT *Block) const;
-  CycleT *getTopLevelParentCycle(const BlockT *Block) const;
+  CycleT *getSmallestCommonCycle(CycleT *A, CycleT *B) const;
+  unsigned getCycleDepth(const BlockT *Block) const;
+  CycleT *getTopLevelParentCycle(BlockT *Block);
 
-  /// Move \p Child to \p NewParent by manipulating Children vectors.
-  ///
-  /// Note: This is an incomplete operation that does not update the
-  /// list of blocks in the new parent or the depth of the subtree.
-  void moveToNewParent(CycleT *NewParent, CycleT *Child);
+  /// Assumes that \p Cycle is the innermost cycle containing \p Block.
+  /// \p Block will be appended to \p Cycle and all of its parent cycles.
+  /// \p Block will be added to BlockMap with \p Cycle and
+  /// BlockMapTopLevel with \p Cycle's top level parent cycle.
+  void addBlockToCycle(BlockT *Block, CycleT *Cycle);
 
   /// Methods for debug and self-test.
   //@{
-  bool validateTree() const;
+  void verifyCycleNest(bool VerifyFull = false) const;
+  void verify() const;
   void print(raw_ostream &Out) const;
   void dump() const { print(dbgs()); }
+  Printable print(const CycleT *Cycle) { return Cycle->print(Context); }
   //@}
 
   /// Iteration over top-level cycles.

@@ -36,14 +36,13 @@ namespace {
 class EhReader {
 public:
   EhReader(InputSectionBase *s, ArrayRef<uint8_t> d) : isec(s), d(d) {}
-  size_t readEhRecordSize();
   uint8_t getFdeEncoding();
   bool hasLSDA();
 
 private:
   template <class P> void failOn(const P *loc, const Twine &msg) {
     fatal("corrupted .eh_frame: " + msg + "\n>>> defined in " +
-          isec->getObjMsg((const uint8_t *)loc - isec->data().data()));
+          isec->getObjMsg((const uint8_t *)loc - isec->content().data()));
   }
 
   uint8_t readByte();
@@ -56,28 +55,6 @@ private:
   InputSectionBase *isec;
   ArrayRef<uint8_t> d;
 };
-}
-
-size_t elf::readEhRecordSize(InputSectionBase *s, size_t off) {
-  return EhReader(s, s->data().slice(off)).readEhRecordSize();
-}
-
-// .eh_frame section is a sequence of records. Each record starts with
-// a 4 byte length field. This function reads the length.
-size_t EhReader::readEhRecordSize() {
-  if (d.size() < 4)
-    failOn(d.data(), "CIE/FDE too small");
-
-  // First 4 bytes of CIE/FDE is the size of the record.
-  // If it is 0xFFFFFFFF, the next 8 bytes contain the size instead,
-  // but we do not support that format yet.
-  uint64_t v = read32(d.data());
-  if (v == UINT32_MAX)
-    failOn(d.data(), "CIE/FDE too large");
-  uint64_t size = v + 4;
-  if (size > d.size())
-    failOn(d.data(), "CIE/FDE ends past the end of the section");
-  return size;
 }
 
 // Read a byte and advance D by one byte.
@@ -120,11 +97,11 @@ void EhReader::skipLeb128() {
   failOn(errPos, "corrupted CIE (failed to read LEB128)");
 }
 
-static size_t getAugPSize(unsigned enc) {
+static size_t getAugPSize(Ctx &ctx, unsigned enc) {
   switch (enc & 0x0f) {
   case DW_EH_PE_absptr:
   case DW_EH_PE_signed:
-    return config->wordsize;
+    return ctx.arg.wordsize;
   case DW_EH_PE_udata2:
   case DW_EH_PE_sdata2:
     return 2;
@@ -142,7 +119,7 @@ void EhReader::skipAugP() {
   uint8_t enc = readByte();
   if ((enc & 0xf0) == DW_EH_PE_aligned)
     failOn(d.data() - 1, "DW_EH_PE_aligned encoding is not supported");
-  size_t size = getAugPSize(enc);
+  size_t size = getAugPSize(isec->getCtx(), enc);
   if (size == 0)
     failOn(d.data() - 1, "unknown FDE encoding");
   if (size >= d.size())
@@ -194,7 +171,7 @@ uint8_t EhReader::getFdeEncoding() {
       readByte();
     else if (c == 'P')
       skipAugP();
-    else if (c != 'B' && c != 'S')
+    else if (c != 'B' && c != 'S' && c != 'G')
       failOn(aug.data(), "unknown .eh_frame augmentation string: " + aug);
   }
   return DW_EH_PE_absptr;
@@ -211,7 +188,7 @@ bool EhReader::hasLSDA() {
       skipAugP();
     else if (c == 'R')
       readByte();
-    else if (c != 'B' && c != 'S')
+    else if (c != 'B' && c != 'S' && c != 'G')
       failOn(aug.data(), "unknown .eh_frame augmentation string: " + aug);
   }
   return false;

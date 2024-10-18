@@ -29,6 +29,7 @@
 using namespace llvm;
 
 #define GET_INSTRINFO_MC_DESC
+#define ENABLE_INSTR_PREDICATE_VERIFIER
 #include "XCoreGenInstrInfo.inc"
 
 #define GET_SUBTARGETINFO_MC_DESC
@@ -116,9 +117,12 @@ void XCoreTargetAsmStreamer::emitCCBottomFunction(StringRef Name) {
 
 static MCTargetStreamer *createTargetAsmStreamer(MCStreamer &S,
                                                  formatted_raw_ostream &OS,
-                                                 MCInstPrinter *InstPrint,
-                                                 bool isVerboseAsm) {
+                                                 MCInstPrinter *InstPrint) {
   return new XCoreTargetAsmStreamer(S, OS);
+}
+
+static MCTargetStreamer *createNullTargetStreamer(MCStreamer &S) {
+  return new XCoreTargetStreamer(S);
 }
 
 // Force static initialization.
@@ -144,4 +148,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeXCoreTargetMC() {
 
   TargetRegistry::RegisterAsmTargetStreamer(getTheXCoreTarget(),
                                             createTargetAsmStreamer);
+
+  TargetRegistry::RegisterNullTargetStreamer(getTheXCoreTarget(),
+                                             createNullTargetStreamer);
 }

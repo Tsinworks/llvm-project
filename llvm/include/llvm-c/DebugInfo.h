@@ -16,8 +16,8 @@
 #ifndef LLVM_C_DEBUGINFO_H
 #define LLVM_C_DEBUGINFO_H
 
-#include "llvm-c/Core.h"
 #include "llvm-c/ExternC.h"
+#include "llvm-c/Types.h"
 
 LLVM_C_EXTERN_C_BEGIN
 
@@ -116,6 +116,29 @@ typedef enum {
   LLVMDWARFSourceLanguageFortran08,
   LLVMDWARFSourceLanguageRenderScript,
   LLVMDWARFSourceLanguageBLISS,
+  LLVMDWARFSourceLanguageKotlin,
+  LLVMDWARFSourceLanguageZig,
+  LLVMDWARFSourceLanguageCrystal,
+  LLVMDWARFSourceLanguageC_plus_plus_17,
+  LLVMDWARFSourceLanguageC_plus_plus_20,
+  LLVMDWARFSourceLanguageC17,
+  LLVMDWARFSourceLanguageFortran18,
+  LLVMDWARFSourceLanguageAda2005,
+  LLVMDWARFSourceLanguageAda2012,
+  LLVMDWARFSourceLanguageHIP,
+  LLVMDWARFSourceLanguageAssembly,
+  LLVMDWARFSourceLanguageC_sharp,
+  LLVMDWARFSourceLanguageMojo,
+  LLVMDWARFSourceLanguageGLSL,
+  LLVMDWARFSourceLanguageGLSL_ES,
+  LLVMDWARFSourceLanguageHLSL,
+  LLVMDWARFSourceLanguageOpenCL_CPP,
+  LLVMDWARFSourceLanguageCPP_for_OpenCL,
+  LLVMDWARFSourceLanguageSYCL,
+  LLVMDWARFSourceLanguageRuby,
+  LLVMDWARFSourceLanguageMove,
+  LLVMDWARFSourceLanguageHylo,
+
   // Vendor extensions:
   LLVMDWARFSourceLanguageMips_Assembler,
   LLVMDWARFSourceLanguageGOOGLE_RenderScript,
@@ -169,7 +192,8 @@ enum {
   LLVMDICommonBlockMetadataKind,
   LLVMDIStringTypeMetadataKind,
   LLVMDIGenericSubrangeMetadataKind,
-  LLVMDIArgListMetadataKind
+  LLVMDIArgListMetadataKind,
+  LLVMDIAssignIDMetadataKind,
 };
 typedef unsigned LLVMMetadataKind;
 
@@ -1102,7 +1126,7 @@ LLVMMetadataRef LLVMDIBuilderGetOrCreateArray(LLVMDIBuilderRef Builder,
  * \param Length      Length of the address operation array.
  */
 LLVMMetadataRef LLVMDIBuilderCreateExpression(LLVMDIBuilderRef Builder,
-                                              int64_t *Addr, size_t Length);
+                                              uint64_t *Addr, size_t Length);
 
 /**
  * Create a new descriptor for the specified variable that does not have an
@@ -1112,7 +1136,7 @@ LLVMMetadataRef LLVMDIBuilderCreateExpression(LLVMDIBuilderRef Builder,
  */
 LLVMMetadataRef
 LLVMDIBuilderCreateConstantValueExpression(LLVMDIBuilderRef Builder,
-                                           int64_t Value);
+                                           uint64_t Value);
 
 /**
  * Create a new descriptor for the specified variable.
@@ -1138,6 +1162,12 @@ LLVMMetadataRef LLVMDIBuilderCreateGlobalVariableExpression(
     size_t NameLen, const char *Linkage, size_t LinkLen, LLVMMetadataRef File,
     unsigned LineNo, LLVMMetadataRef Ty, LLVMBool LocalToUnit,
     LLVMMetadataRef Expr, LLVMMetadataRef Decl, uint32_t AlignInBits);
+
+
+/**
+ * Get the dwarf::Tag of a DINode
+ */
+uint16_t LLVMGetDINodeTag(LLVMMetadataRef MD);
 
 /**
  * Retrieves the \c DIVariable associated with this global variable expression.
@@ -1232,66 +1262,84 @@ LLVMMetadataRef LLVMDIBuilderCreateTempGlobalVariableFwdDecl(
     LLVMMetadataRef Decl, uint32_t AlignInBits);
 
 /**
- * Insert a new llvm.dbg.declare intrinsic call before the given instruction.
+ * Only use in "new debug format" (LLVMIsNewDbgInfoFormat() is true).
+ * See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes
+ *
+ * The debug format can be switched later after inserting the records using
+ * LLVMSetIsNewDbgInfoFormat, if needed for legacy or transitionary reasons.
+ *
+ * Insert a Declare DbgRecord before the given instruction.
  * \param Builder     The DIBuilder.
  * \param Storage     The storage of the variable to declare.
  * \param VarInfo     The variable's debug info descriptor.
  * \param Expr        A complex location expression for the variable.
  * \param DebugLoc    Debug info location.
- * \param Instr       Instruction acting as a location for the new intrinsic.
+ * \param Instr       Instruction acting as a location for the new record.
  */
-LLVMValueRef LLVMDIBuilderInsertDeclareBefore(
-  LLVMDIBuilderRef Builder, LLVMValueRef Storage, LLVMMetadataRef VarInfo,
-  LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMValueRef Instr);
+LLVMDbgRecordRef LLVMDIBuilderInsertDeclareRecordBefore(
+    LLVMDIBuilderRef Builder, LLVMValueRef Storage, LLVMMetadataRef VarInfo,
+    LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMValueRef Instr);
 
 /**
- * Insert a new llvm.dbg.declare intrinsic call at the end of the given basic
- * block. If the basic block has a terminator instruction, the intrinsic is
- * inserted before that terminator instruction.
+ * Only use in "new debug format" (LLVMIsNewDbgInfoFormat() is true).
+ * See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes
+ *
+ * The debug format can be switched later after inserting the records using
+ * LLVMSetIsNewDbgInfoFormat, if needed for legacy or transitionary reasons.
+ *
+ * Insert a Declare DbgRecord at the end of the given basic block. If the basic
+ * block has a terminator instruction, the record is inserted before that
+ * terminator instruction.
  * \param Builder     The DIBuilder.
  * \param Storage     The storage of the variable to declare.
  * \param VarInfo     The variable's debug info descriptor.
  * \param Expr        A complex location expression for the variable.
  * \param DebugLoc    Debug info location.
- * \param Block       Basic block acting as a location for the new intrinsic.
+ * \param Block       Basic block acting as a location for the new record.
  */
-LLVMValueRef LLVMDIBuilderInsertDeclareAtEnd(
+LLVMDbgRecordRef LLVMDIBuilderInsertDeclareRecordAtEnd(
     LLVMDIBuilderRef Builder, LLVMValueRef Storage, LLVMMetadataRef VarInfo,
     LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMBasicBlockRef Block);
 
 /**
- * Insert a new llvm.dbg.value intrinsic call before the given instruction.
+ * Only use in "new debug format" (LLVMIsNewDbgInfoFormat() is true).
+ * See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes
+ *
+ * The debug format can be switched later after inserting the records using
+ * LLVMSetIsNewDbgInfoFormat, if needed for legacy or transitionary reasons.
+ *
+ * Insert a new debug record before the given instruction.
  * \param Builder     The DIBuilder.
  * \param Val         The value of the variable.
  * \param VarInfo     The variable's debug info descriptor.
  * \param Expr        A complex location expression for the variable.
  * \param DebugLoc    Debug info location.
- * \param Instr       Instruction acting as a location for the new intrinsic.
+ * \param Instr       Instruction acting as a location for the new record.
  */
-LLVMValueRef LLVMDIBuilderInsertDbgValueBefore(LLVMDIBuilderRef Builder,
-                                               LLVMValueRef Val,
-                                               LLVMMetadataRef VarInfo,
-                                               LLVMMetadataRef Expr,
-                                               LLVMMetadataRef DebugLoc,
-                                               LLVMValueRef Instr);
+LLVMDbgRecordRef LLVMDIBuilderInsertDbgValueRecordBefore(
+    LLVMDIBuilderRef Builder, LLVMValueRef Val, LLVMMetadataRef VarInfo,
+    LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMValueRef Instr);
 
 /**
- * Insert a new llvm.dbg.value intrinsic call at the end of the given basic
- * block. If the basic block has a terminator instruction, the intrinsic is
- * inserted before that terminator instruction.
+ * Only use in "new debug format" (LLVMIsNewDbgInfoFormat() is true).
+ * See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes
+ *
+ * The debug format can be switched later after inserting the records using
+ * LLVMSetIsNewDbgInfoFormat, if needed for legacy or transitionary reasons.
+ *
+ * Insert a new debug record at the end of the given basic block. If the
+ * basic block has a terminator instruction, the record is inserted before
+ * that terminator instruction.
  * \param Builder     The DIBuilder.
  * \param Val         The value of the variable.
  * \param VarInfo     The variable's debug info descriptor.
  * \param Expr        A complex location expression for the variable.
  * \param DebugLoc    Debug info location.
- * \param Block       Basic block acting as a location for the new intrinsic.
+ * \param Block       Basic block acting as a location for the new record.
  */
-LLVMValueRef LLVMDIBuilderInsertDbgValueAtEnd(LLVMDIBuilderRef Builder,
-                                              LLVMValueRef Val,
-                                              LLVMMetadataRef VarInfo,
-                                              LLVMMetadataRef Expr,
-                                              LLVMMetadataRef DebugLoc,
-                                              LLVMBasicBlockRef Block);
+LLVMDbgRecordRef LLVMDIBuilderInsertDbgValueRecordAtEnd(
+    LLVMDIBuilderRef Builder, LLVMValueRef Val, LLVMMetadataRef VarInfo,
+    LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMBasicBlockRef Block);
 
 /**
  * Create a new descriptor for a local auto variable.

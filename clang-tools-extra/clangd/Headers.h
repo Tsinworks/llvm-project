@@ -12,23 +12,22 @@
 #include "Protocol.h"
 #include "SourceCode.h"
 #include "index/Symbol.h"
-#include "support/Logger.h"
 #include "support/Path.h"
 #include "clang/Basic/FileEntry.h"
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Format/Format.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/HeaderSearch.h"
-#include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/Inclusions/HeaderIncludes.h"
+#include "clang/Tooling/Inclusions/StandardLibrary.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem/UniqueID.h"
-#include "llvm/Support/VirtualFileSystem.h"
+#include <optional>
 #include <string>
 
 namespace clang {
@@ -47,6 +46,15 @@ struct HeaderFile {
   bool valid() const;
 };
 
+/// A header and directives as stored in a Symbol.
+struct SymbolInclude {
+  /// The header to include. This is either a URI or a verbatim include which is
+  /// quoted with <> or "".
+  llvm::StringRef Header;
+  /// The include directive(s) that can be used, e.g. #import and/or #include.
+  Symbol::IncludeDirective Directive;
+};
+
 /// Creates a `HeaderFile` from \p Header which can be either a URI or a literal
 /// include.
 llvm::Expected<HeaderFile> toHeaderFile(llvm::StringRef Header,
@@ -54,7 +62,7 @@ llvm::Expected<HeaderFile> toHeaderFile(llvm::StringRef Header,
 
 // Returns include headers for \p Sym sorted by popularity. If two headers are
 // equally popular, prefer the shorter one.
-llvm::SmallVector<llvm::StringRef, 1> getRankedIncludes(const Symbol &Sym);
+llvm::SmallVector<SymbolInclude, 1> getRankedIncludes(const Symbol &Sym);
 
 // An #include directive that we found in the main file.
 struct Inclusion {
@@ -64,8 +72,7 @@ struct Inclusion {
   unsigned HashOffset = 0; // Byte offset from start of file to #.
   int HashLine = 0;        // Line number containing the directive, 0-indexed.
   SrcMgr::CharacteristicKind FileKind = SrcMgr::C_User;
-  llvm::Optional<unsigned> HeaderID;
-  bool BehindPragmaKeep = false; // Has IWYU pragma: keep right after.
+  std::optional<unsigned> HeaderID;
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const Inclusion &);
 bool operator==(const Inclusion &LHS, const Inclusion &RHS);
@@ -135,20 +142,21 @@ public:
   // file builds.
   enum class HeaderID : unsigned {};
 
-  llvm::Optional<HeaderID> getID(const FileEntry *Entry) const;
-  HeaderID getOrCreateID(const FileEntry *Entry);
+  std::optional<HeaderID> getID(const FileEntry *Entry) const;
+  HeaderID getOrCreateID(FileEntryRef Entry);
 
   StringRef getRealPath(HeaderID ID) const {
     assert(static_cast<unsigned>(ID) <= RealPathNames.size());
     return RealPathNames[static_cast<unsigned>(ID)];
   }
 
-  bool isSelfContained(HeaderID ID) const {
-    return !NonSelfContained.contains(ID);
-  }
-
   // Return all transitively reachable files.
   llvm::ArrayRef<std::string> allHeaders() const { return RealPathNames; }
+
+  // Returns includes inside the main file with the given spelling.
+  // Spelling should include brackets or quotes, e.g. <foo>.
+  llvm::SmallVector<const Inclusion *>
+  mainFileIncludesWithSpelling(llvm::StringRef Spelling) const;
 
   // Return all transitively reachable files, and their minimum include depth.
   // All transitive includes (absolute paths), with their minimum include depth.
@@ -160,7 +168,15 @@ public:
   // Maps HeaderID to the ids of the files included from it.
   llvm::DenseMap<HeaderID, SmallVector<HeaderID>> IncludeChildren;
 
+  llvm::DenseMap<tooling::stdlib::Header, llvm::SmallVector<HeaderID>>
+      StdlibHeaders;
+
   std::vector<Inclusion> MainFileIncludes;
+
+  // The entries of the header search path. (HeaderSearch::search_dir_range())
+  // Only includes the plain-directory entries (not header maps or frameworks).
+  // All paths are canonical (FileManager::getCanonicalPath()).
+  std::vector<std::string> SearchPathsCanonical;
 
   // We reserve HeaderID(0) for the main file and will manually check for that
   // in getID and getOrCreateID because the UniqueID is not stable when the
@@ -181,9 +197,10 @@ private:
   // and RealPathName and UniqueID are not preserved in
   // the preamble.
   llvm::DenseMap<llvm::sys::fs::UniqueID, HeaderID> UIDToIndex;
-  // Contains HeaderIDs of all non self-contained entries in the
-  // IncludeStructure.
-  llvm::DenseSet<HeaderID> NonSelfContained;
+
+  // Maps written includes to indices in MainFileInclude for easier lookup by
+  // spelling.
+  llvm::StringMap<llvm::SmallVector<unsigned>> MainFileIncludesBySpelling;
 };
 
 // Calculates insertion edit for including a new header in a file.
@@ -223,15 +240,16 @@ public:
   /// \param IncludingFile is the absolute path of the file that InsertedHeader
   /// will be inserted.
   ///
-  /// \return A quoted "path" or <path> to be included, or None if it couldn't
-  /// be shortened.
-  llvm::Optional<std::string>
+  /// \return A quoted "path" or <path> to be included, or std::nullopt if it
+  /// couldn't be shortened.
+  std::optional<std::string>
   calculateIncludePath(const HeaderFile &InsertedHeader,
                        llvm::StringRef IncludingFile) const;
 
   /// Calculates an edit that inserts \p VerbatimHeader into code. If the header
-  /// is already included, this returns None.
-  llvm::Optional<TextEdit> insert(llvm::StringRef VerbatimHeader) const;
+  /// is already included, this returns std::nullopt.
+  std::optional<TextEdit> insert(llvm::StringRef VerbatimHeader,
+                                 tooling::IncludeDirective Directive) const;
 
 private:
   StringRef FileName;
@@ -250,13 +268,11 @@ namespace llvm {
 // Support HeaderIDs as DenseMap keys.
 template <> struct DenseMapInfo<clang::clangd::IncludeStructure::HeaderID> {
   static inline clang::clangd::IncludeStructure::HeaderID getEmptyKey() {
-    return static_cast<clang::clangd::IncludeStructure::HeaderID>(
-        DenseMapInfo<unsigned>::getEmptyKey());
+    return static_cast<clang::clangd::IncludeStructure::HeaderID>(-1);
   }
 
   static inline clang::clangd::IncludeStructure::HeaderID getTombstoneKey() {
-    return static_cast<clang::clangd::IncludeStructure::HeaderID>(
-        DenseMapInfo<unsigned>::getTombstoneKey());
+    return static_cast<clang::clangd::IncludeStructure::HeaderID>(-2);
   }
 
   static unsigned

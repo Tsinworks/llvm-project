@@ -4,11 +4,10 @@
 ; RUN: llc -O0 -mtriple=x86_64-unknown-linux-gnu %s -filetype=obj -o %t.o
 ; RUN: llvm-dwarfdump %t.o | FileCheck %s
 ;
-; CHECK: [[ITEM2:0x.+]]:       DW_TAG_variable
-; CHECK:                          DW_AT_name  ("b")
-; CHECK:                       DW_TAG_variable
 ; CHECK: [[ITEM1:0x.+]]:       DW_TAG_variable
 ; CHECK:                          DW_AT_name  ("a")
+; CHECK: [[ITEM2:0x.+]]:       DW_TAG_variable
+; CHECK:                          DW_AT_name  ("b")
 ; CHECK: DW_TAG_namelist
 ; CHECK:    DW_AT_name  ("nml")
 ; CHECK: DW_TAG_namelist_item
@@ -34,7 +33,7 @@ source_filename = "namelist.ll"
 define void @MAIN_() !dbg !2 {
 L.entry:
   %b_350 = alloca i32, align 4
-  call void @llvm.dbg.declare(metadata i32* %b_350, metadata !12, metadata !DIExpression()), !dbg !13
+  call void @llvm.dbg.declare(metadata ptr %b_350, metadata !12, metadata !DIExpression()), !dbg !13
   call void @llvm.dbg.value(metadata i32 1, metadata !14, metadata !DIExpression()), !dbg !13
   ret void, !dbg !17
 }

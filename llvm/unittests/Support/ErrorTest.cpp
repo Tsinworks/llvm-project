@@ -12,8 +12,8 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Testing/Support/Error.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest-spi.h"
 #include "gtest/gtest.h"
 #include <memory>
@@ -179,7 +179,7 @@ TEST(Error, HandleCustomError) {
     CaughtErrorInfo = CE.getInfo();
   });
 
-  EXPECT_TRUE(CaughtErrorInfo == 42) << "Wrong result from CustomError handler";
+  EXPECT_EQ(CaughtErrorInfo, 42) << "Wrong result from CustomError handler";
 }
 
 // Check that handler type deduction also works for handlers
@@ -253,7 +253,8 @@ TEST(Error, HandleCustomErrorWithCustomBaseClass) {
                     CaughtErrorExtraInfo = SE.getExtraInfo();
                   });
 
-  EXPECT_TRUE(CaughtErrorInfo == 42 && CaughtErrorExtraInfo == 7)
+  EXPECT_EQ(CaughtErrorInfo, 42) << "Wrong result from CustomSubError handler";
+  EXPECT_EQ(CaughtErrorExtraInfo, 7)
       << "Wrong result from CustomSubError handler";
 }
 
@@ -270,9 +271,9 @@ TEST(Error, FirstHandlerOnly) {
                   },
                   [&](const CustomError &CE) { DummyInfo = CE.getInfo(); });
 
-  EXPECT_TRUE(CaughtErrorInfo == 42 && CaughtErrorExtraInfo == 7 &&
-              DummyInfo == 0)
-      << "Activated the wrong Error handler(s)";
+  EXPECT_EQ(CaughtErrorInfo, 42) << "Activated the wrong Error handler(s)";
+  EXPECT_EQ(CaughtErrorExtraInfo, 7) << "Activated the wrong Error handler(s)";
+  EXPECT_EQ(DummyInfo, 0) << "Activated the wrong Error handler(s)";
 }
 
 // Check that general handlers shadow specific ones.
@@ -289,7 +290,11 @@ TEST(Error, HandlerShadowing) {
         DummyExtraInfo = SE.getExtraInfo();
       });
 
-  EXPECT_TRUE(CaughtErrorInfo == 42 && DummyInfo == 0 && DummyExtraInfo == 0)
+  EXPECT_EQ(CaughtErrorInfo, 42)
+      << "General Error handler did not shadow specific handler";
+  EXPECT_EQ(DummyInfo, 0)
+      << "General Error handler did not shadow specific handler";
+  EXPECT_EQ(DummyExtraInfo, 0)
       << "General Error handler did not shadow specific handler";
 }
 
@@ -317,9 +322,9 @@ TEST(Error, CheckJoinErrors) {
                     CustomErrorInfo1 = CE.getInfo();
                   });
 
-  EXPECT_TRUE(CustomErrorInfo1 == 7 && CustomErrorInfo2 == 42 &&
-              CustomErrorExtraInfo == 7)
-      << "Failed handling compound Error.";
+  EXPECT_EQ(CustomErrorInfo1, 7) << "Failed handling compound Error.";
+  EXPECT_EQ(CustomErrorInfo2, 42) << "Failed handling compound Error.";
+  EXPECT_EQ(CustomErrorExtraInfo, 7) << "Failed handling compound Error.";
 
   // Test appending a single item to a list.
   {
@@ -437,7 +442,7 @@ TEST(Error, StringError) {
   raw_string_ostream S(Msg);
   logAllUnhandledErrors(
       make_error<StringError>("foo" + Twine(42), inconvertibleErrorCode()), S);
-  EXPECT_EQ(S.str(), "foo42\n") << "Unexpected StringError log result";
+  EXPECT_EQ(Msg, "foo42\n") << "Unexpected StringError log result";
 
   auto EC =
     errorToErrorCode(make_error<StringError>("", errc::invalid_argument));
@@ -452,16 +457,14 @@ TEST(Error, createStringError) {
   raw_string_ostream S(Msg);
   logAllUnhandledErrors(createStringError(EC, "foo%s%d0x%" PRIx8, Bar, 1, 0xff),
                         S);
-  EXPECT_EQ(S.str(), "foobar10xff\n")
-    << "Unexpected createStringError() log result";
+  EXPECT_EQ(Msg, "foobar10xff\n")
+      << "Unexpected createStringError() log result";
 
-  S.flush();
   Msg.clear();
   logAllUnhandledErrors(createStringError(EC, Bar), S);
-  EXPECT_EQ(S.str(), "bar\n")
-    << "Unexpected createStringError() (overloaded) log result";
+  EXPECT_EQ(Msg, "bar\n")
+      << "Unexpected createStringError() (overloaded) log result";
 
-  S.flush();
   Msg.clear();
   auto Res = errorToErrorCode(createStringError(EC, "foo%s", Bar));
   EXPECT_EQ(Res, EC)
@@ -469,7 +472,7 @@ TEST(Error, createStringError) {
 }
 
 // Test that the ExitOnError utility works as expected.
-TEST(Error, ExitOnError) {
+TEST(ErrorDeathTest, ExitOnError) {
   ExitOnError ExitOnErr;
   ExitOnErr.setBanner("Error in tool:");
   ExitOnErr.setExitCodeMapper([](const Error &E) {
@@ -735,15 +738,25 @@ TEST(Error, ErrorCodeConversions) {
 TEST(Error, ErrorMessage) {
   EXPECT_EQ(toString(Error::success()), "");
 
+  Error E0 = Error::success();
+  EXPECT_EQ(toStringWithoutConsuming(E0), "");
+  EXPECT_EQ(toString(std::move(E0)), "");
+
   Error E1 = make_error<CustomError>(0);
+  EXPECT_EQ(toStringWithoutConsuming(E1), "CustomError {0}");
   EXPECT_EQ(toString(std::move(E1)), "CustomError {0}");
 
   Error E2 = make_error<CustomError>(0);
+  visitErrors(E2, [](const ErrorInfoBase &EI) {
+    EXPECT_EQ(EI.message(), "CustomError {0}");
+  });
   handleAllErrors(std::move(E2), [](const CustomError &CE) {
     EXPECT_EQ(CE.message(), "CustomError {0}");
   });
 
   Error E3 = joinErrors(make_error<CustomError>(0), make_error<CustomError>(1));
+  EXPECT_EQ(toStringWithoutConsuming(E3), "CustomError {0}\n"
+                                          "CustomError {1}");
   EXPECT_EQ(toString(std::move(E3)), "CustomError {0}\n"
                                      "CustomError {1}");
 }
@@ -754,7 +767,7 @@ TEST(Error, Stream) {
     std::string Buf;
     llvm::raw_string_ostream S(Buf);
     S << OK;
-    EXPECT_EQ("success", S.str());
+    EXPECT_EQ("success", Buf);
     consumeError(std::move(OK));
   }
   {
@@ -762,7 +775,7 @@ TEST(Error, Stream) {
     std::string Buf;
     llvm::raw_string_ostream S(Buf);
     S << E1;
-    EXPECT_EQ("CustomError {0}", S.str());
+    EXPECT_EQ("CustomError {0}", Buf);
     consumeError(std::move(E1));
   }
 }
@@ -915,6 +928,8 @@ TEST(Error, C_API) {
     });
   EXPECT_TRUE(GotCSE) << "Failed to round-trip ErrorList via C API";
   EXPECT_TRUE(GotCE) << "Failed to round-trip ErrorList via C API";
+
+  LLVMCantFail(wrap(Error::success()));
 }
 
 TEST(Error, FileErrorTest) {
@@ -1034,8 +1049,10 @@ public:
   }
 };
 
-static llvm::ManagedStatic<TestErrorCategory> TestErrCategory;
-const std::error_category &TErrorCategory() { return *TestErrCategory; }
+const std::error_category &TErrorCategory() {
+  static TestErrorCategory TestErrCategory;
+  return TestErrCategory;
+}
 
 char TestDebugError::ID;
 
@@ -1064,7 +1081,7 @@ static Error createAnyError() {
 }
 
 struct MoveOnlyBox {
-  Optional<int> Box;
+  std::optional<int> Box;
 
   explicit MoveOnlyBox(int I) : Box(I) {}
   MoveOnlyBox() = default;
@@ -1091,7 +1108,7 @@ TEST(Error, moveInto) {
 
     // Failure with no prior value.
     EXPECT_THAT_ERROR(makeFailure().moveInto(V), Failed());
-    EXPECT_EQ(None, V.Box);
+    EXPECT_EQ(std::nullopt, V.Box);
 
     // Success with no prior value.
     EXPECT_THAT_ERROR(make(5).moveInto(V), Succeeded());
@@ -1111,9 +1128,9 @@ TEST(Error, moveInto) {
   // Check that this works with optionals too.
   {
     // Same cases as above.
-    Optional<MoveOnlyBox> MaybeV;
+    std::optional<MoveOnlyBox> MaybeV;
     EXPECT_THAT_ERROR(makeFailure().moveInto(MaybeV), Failed());
-    EXPECT_EQ(None, MaybeV);
+    EXPECT_EQ(std::nullopt, MaybeV);
 
     EXPECT_THAT_ERROR(make(5).moveInto(MaybeV), Succeeded());
     EXPECT_EQ(MoveOnlyBox(5), MaybeV);
@@ -1126,4 +1143,47 @@ TEST(Error, moveInto) {
   }
 }
 
+TEST(Error, FatalBadAllocErrorHandlersInteraction) {
+  auto ErrorHandler = [](void *Data, const char *, bool) {};
+  install_fatal_error_handler(ErrorHandler, nullptr);
+  // The following call should not crash; previously, a bug in
+  // install_bad_alloc_error_handler asserted that no fatal-error handler is
+  // installed already.
+  install_bad_alloc_error_handler(ErrorHandler, nullptr);
+
+  // Don't interfere with other tests.
+  remove_fatal_error_handler();
+  remove_bad_alloc_error_handler();
+}
+
+TEST(Error, BadAllocFatalErrorHandlersInteraction) {
+  auto ErrorHandler = [](void *Data, const char *, bool) {};
+  install_bad_alloc_error_handler(ErrorHandler, nullptr);
+  // The following call should not crash; related to
+  // FatalBadAllocErrorHandlersInteraction: Ensure that the error does not occur
+  // in the other direction.
+  install_fatal_error_handler(ErrorHandler, nullptr);
+
+  // Don't interfere with other tests.
+  remove_fatal_error_handler();
+  remove_bad_alloc_error_handler();
+}
+
+TEST(Error, ForwardToExpected) {
+  auto ErrorReturningFct = [](bool Fail) {
+    return Fail ? make_error<StringError>(llvm::errc::invalid_argument,
+                                          "Some Error")
+                : Error::success();
+  };
+  auto ExpectedReturningFct = [&](bool Fail) -> Expected<int> {
+    auto Err = ErrorReturningFct(Fail);
+    if (Err)
+      return Err;
+    return 42;
+  };
+  std::optional<int> MaybeV;
+  EXPECT_THAT_ERROR(ExpectedReturningFct(true).moveInto(MaybeV), Failed());
+  EXPECT_THAT_ERROR(ExpectedReturningFct(false).moveInto(MaybeV), Succeeded());
+  EXPECT_EQ(*MaybeV, 42);
+}
 } // namespace

@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17
-// UNSUPPORTED: libcpp-no-concepts, libcpp-has-no-incomplete-ranges
 
 // <memory>
 
@@ -27,14 +26,14 @@
 #include "test_macros.h"
 #include "test_iterators.h"
 
+// TODO(varconst): consolidate the ADL checks into a single file.
 // Because this is a variable and not a function, it's guaranteed that ADL won't be used. However,
 // implementations are allowed to use a different mechanism to achieve this effect, so this check is
 // libc++-specific.
 LIBCPP_STATIC_ASSERT(std::is_class_v<decltype(std::ranges::uninitialized_fill_n)>);
 
 struct NotConvertibleFromInt {};
-static_assert(!std::is_invocable_v<decltype(std::ranges::uninitialized_fill_n), NotConvertibleFromInt*,
-                                   NotConvertibleFromInt*, int>);
+static_assert(!std::is_invocable_v<decltype(std::ranges::uninitialized_fill_n), NotConvertibleFromInt*, std::size_t, int>);
 
 int main(int, char**) {
   constexpr int value = 42;
@@ -101,20 +100,6 @@ int main(int, char**) {
     Counted::reset();
   }
 #endif // TEST_HAS_NO_EXCEPTIONS
-
-  // Works with const iterators.
-  {
-    constexpr int N = 5;
-    Buffer<Counted, N> buf;
-
-    std::ranges::uninitialized_fill_n(buf.cbegin(), N, x);
-    assert(Counted::current_objects == N);
-    assert(Counted::total_objects == N);
-    assert(std::all_of(buf.begin(), buf.end(), pred));
-
-    std::destroy(buf.begin(), buf.end());
-    Counted::reset();
-  }
 
   return 0;
 }

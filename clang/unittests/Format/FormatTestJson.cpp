@@ -16,10 +16,10 @@
 namespace clang {
 namespace format {
 
-class FormatTestJson : public ::testing::Test {
+class FormatTestJson : public testing::Test {
 protected:
-  static std::string format(llvm::StringRef Code, unsigned Offset,
-                            unsigned Length, const FormatStyle &Style) {
+  static std::string format(StringRef Code, unsigned Offset, unsigned Length,
+                            const FormatStyle &Style) {
     LLVM_DEBUG(llvm::errs() << "---\n");
     LLVM_DEBUG(llvm::errs() << Code << "\n\n");
 
@@ -30,14 +30,12 @@ protected:
     if (Style.isJson() && !Style.DisableFormat) {
       auto Err = Replaces.add(
           tooling::Replacement(tooling::Replacement("", 0, 0, "x = ")));
-      if (Err) {
+      if (Err)
         llvm::errs() << "Bad Json variable insertion\n";
-      }
     }
     auto ChangedCode = applyAllReplacements(Code, Replaces);
-    if (!ChangedCode) {
+    if (!ChangedCode)
       llvm::errs() << "Bad Json varibale replacement\n";
-    }
     StringRef NewCode = *ChangedCode;
 
     std::vector<tooling::Range> Ranges(1, tooling::Range(0, NewCode.size()));
@@ -49,7 +47,7 @@ protected:
   }
 
   static std::string
-  format(llvm::StringRef Code,
+  format(StringRef Code,
          const FormatStyle &Style = getLLVMStyle(FormatStyle::LK_Json)) {
     return format(Code, 0, Code.size(), Style);
   }
@@ -60,13 +58,12 @@ protected:
     return Style;
   }
 
-  static void verifyFormatStable(llvm::StringRef Code,
-                                 const FormatStyle &Style) {
+  static void verifyFormatStable(StringRef Code, const FormatStyle &Style) {
     EXPECT_EQ(Code.str(), format(Code, Style)) << "Expected code is not stable";
   }
 
   static void
-  verifyFormat(llvm::StringRef Code,
+  verifyFormat(StringRef Code,
                const FormatStyle &Style = getLLVMStyle(FormatStyle::LK_Json)) {
     verifyFormatStable(Code, Style);
     EXPECT_EQ(Code.str(), format(test::messUp(Code), Style));
@@ -161,6 +158,27 @@ TEST_F(FormatTestJson, JsonArray) {
                "]");
 }
 
+TEST_F(FormatTestJson, JsonArrayOneLine) {
+  FormatStyle Style = getLLVMStyle(FormatStyle::LK_Json);
+  Style.BreakArrays = false;
+  Style.SpacesInContainerLiterals = false;
+  verifyFormat("[]", Style);
+  verifyFormat("[1]", Style);
+  verifyFormat("[1, 2]", Style);
+  verifyFormat("[1, 2, 3]", Style);
+  verifyFormat("[1, 2, 3, 4]", Style);
+  verifyFormat("[1, 2, 3, 4, 5]", Style);
+
+  verifyFormat("[\n"
+               "  1,\n"
+               "  2,\n"
+               "  {\n"
+               "    A: 1\n"
+               "  }\n"
+               "]",
+               Style);
+}
+
 TEST_F(FormatTestJson, JsonNoStringSplit) {
   FormatStyle Style = getLLVMStyle(FormatStyle::LK_Json);
   Style.IndentWidth = 4;
@@ -215,6 +233,41 @@ TEST_F(FormatTestJson, DisableJsonFormat) {
                      "  \"name\": 1\n"
                      "}",
                      Style);
+}
+
+TEST_F(FormatTestJson, SpaceBeforeJsonColon) {
+  FormatStyle Style = getLLVMStyle(FormatStyle::LK_Json);
+  verifyFormatStable("{\n"
+                     "  \"name\": 1\n"
+                     "}",
+                     Style);
+
+  Style.SpaceBeforeJsonColon = true;
+  verifyFormatStable("{}", Style);
+  verifyFormatStable("{\n"
+                     "  \"name\" : 1\n"
+                     "}",
+                     Style);
+}
+
+TEST_F(FormatTestJson, StartsWithWhitespaces) {
+  FormatStyle Style = getLLVMStyle(FormatStyle::LK_Json);
+  EXPECT_EQ("{\n"
+            "  \"name\": 1\n"
+            "}",
+            format(" {\n"
+                   "  \"name\": 1\n"
+                   "}",
+                   Style));
+
+  // FIXME: The block below is over-indented.
+  EXPECT_EQ("    {\n"
+            "      \"name\": 1\n"
+            "    }",
+            format("\n{\n"
+                   "  \"name\": 1\n"
+                   "}",
+                   Style));
 }
 
 } // namespace format

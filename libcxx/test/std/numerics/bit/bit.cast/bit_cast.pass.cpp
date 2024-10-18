@@ -21,6 +21,8 @@
 #include <cstring>
 #include <limits>
 
+#include "test_macros.h"
+
 // std::bit_cast does not preserve padding bits, so if T has padding bits,
 // the results might not memcmp cleanly.
 template<bool HasUniqueObjectRepresentations = true, typename T>
@@ -227,13 +229,36 @@ bool tests() {
         test_roundtrip_through_nested_T<false>(i);
         test_roundtrip_through_buffer<false>(i);
 
-#if __SIZEOF_LONG_DOUBLE__ == __SIZEOF_DOUBLE__
+#ifdef TEST_LONG_DOUBLE_IS_DOUBLE
         test_roundtrip_through<double, false>(i);
 #endif
-#if defined(__SIZEOF_INT128__) && __SIZEOF_LONG_DOUBLE__ == __SIZEOF_INT128__
+#if defined(__SIZEOF_INT128__) && __SIZEOF_LONG_DOUBLE__ == __SIZEOF_INT128__ &&                                       \
+    !TEST_HAS_FEATURE(memory_sanitizer) // Some bits are just padding.
         test_roundtrip_through<__int128_t, false>(i);
         test_roundtrip_through<__uint128_t, false>(i);
 #endif
+    }
+
+    // Test pointers
+    {
+        {
+            int obj = 3;
+            void* p = &obj;
+            test_roundtrip_through_nested_T(p);
+            test_roundtrip_through_buffer(p);
+            test_roundtrip_through<void*>(p);
+            test_roundtrip_through<char*>(p);
+            test_roundtrip_through<int*>(p);
+        }
+        {
+            int obj = 3;
+            int* p = &obj;
+            test_roundtrip_through_nested_T(p);
+            test_roundtrip_through_buffer(p);
+            test_roundtrip_through<int*>(p);
+            test_roundtrip_through<char*>(p);
+            test_roundtrip_through<void*>(p);
+        }
     }
 
     return true;

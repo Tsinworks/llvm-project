@@ -11,28 +11,31 @@
 
 #include "gtest/gtest.h"
 #include "flang/Optimizer/Builder/FIRBuilder.h"
+#include "flang/Optimizer/Dialect/Support/KindMapping.h"
 #include "flang/Optimizer/Support/InitFIR.h"
-#include "flang/Optimizer/Support/KindMapping.h"
 
 struct RuntimeCallTest : public testing::Test {
 public:
   void SetUp() override {
+    fir::support::loadDialects(context);
+
     mlir::OpBuilder builder(&context);
     auto loc = builder.getUnknownLoc();
 
     // Set up a Module with a dummy function operation inside.
     // Set the insertion point in the function entry block.
     mlir::ModuleOp mod = builder.create<mlir::ModuleOp>(loc);
-    mlir::FuncOp func = mlir::FuncOp::create(loc, "runtime_unit_tests_func",
-        builder.getFunctionType(llvm::None, llvm::None));
+    mlir::func::FuncOp func =
+        mlir::func::FuncOp::create(loc, "runtime_unit_tests_func",
+            builder.getFunctionType(std::nullopt, std::nullopt));
     auto *entryBlock = func.addEntryBlock();
     mod.push_back(mod);
     builder.setInsertionPointToStart(entryBlock);
 
-    fir::support::loadDialects(context);
     kindMap = std::make_unique<fir::KindMapping>(&context);
     firBuilder = std::make_unique<fir::FirOpBuilder>(mod, *kindMap);
 
+    i1Ty = firBuilder->getI1Type();
     i8Ty = firBuilder->getI8Type();
     i16Ty = firBuilder->getIntegerType(16);
     i32Ty = firBuilder->getI32Type();
@@ -44,13 +47,22 @@ public:
     f80Ty = firBuilder->getF80Type();
     f128Ty = firBuilder->getF128Type();
 
-    c4Ty = fir::ComplexType::get(firBuilder->getContext(), 4);
-    c8Ty = fir::ComplexType::get(firBuilder->getContext(), 8);
-    c10Ty = fir::ComplexType::get(firBuilder->getContext(), 10);
-    c16Ty = fir::ComplexType::get(firBuilder->getContext(), 16);
+    c4Ty = mlir::ComplexType::get(f32Ty);
+    c8Ty = mlir::ComplexType::get(f64Ty);
+    c10Ty = mlir::ComplexType::get(f80Ty);
+    c16Ty = mlir::ComplexType::get(f128Ty);
 
     seqTy10 = fir::SequenceType::get(fir::SequenceType::Shape(1, 10), i32Ty);
     boxTy = fir::BoxType::get(mlir::NoneType::get(firBuilder->getContext()));
+
+    char1Ty = fir::CharacterType::getSingleton(builder.getContext(), 1);
+    char2Ty = fir::CharacterType::getSingleton(builder.getContext(), 2);
+    char4Ty = fir::CharacterType::getSingleton(builder.getContext(), 4);
+
+    logical1Ty = fir::LogicalType::get(builder.getContext(), 1);
+    logical2Ty = fir::LogicalType::get(builder.getContext(), 2);
+    logical4Ty = fir::LogicalType::get(builder.getContext(), 4);
+    logical8Ty = fir::LogicalType::get(builder.getContext(), 8);
   }
 
   mlir::MLIRContext context;
@@ -58,6 +70,7 @@ public:
   std::unique_ptr<fir::FirOpBuilder> firBuilder;
 
   // Commonly used types
+  mlir::Type i1Ty;
   mlir::Type i8Ty;
   mlir::Type i16Ty;
   mlir::Type i32Ty;
@@ -73,6 +86,13 @@ public:
   mlir::Type c16Ty;
   mlir::Type seqTy10;
   mlir::Type boxTy;
+  mlir::Type char1Ty;
+  mlir::Type char2Ty;
+  mlir::Type char4Ty;
+  mlir::Type logical1Ty;
+  mlir::Type logical2Ty;
+  mlir::Type logical4Ty;
+  mlir::Type logical8Ty;
 };
 
 /// Check that the \p op is a `fir::CallOp` operation and its name matches
@@ -83,13 +103,13 @@ static inline void checkCallOp(mlir::Operation *op, llvm::StringRef fctName,
     unsigned nbArgs, bool addLocArgs = true) {
   EXPECT_TRUE(mlir::isa<fir::CallOp>(*op));
   auto callOp = mlir::dyn_cast<fir::CallOp>(*op);
-  EXPECT_TRUE(callOp.callee().hasValue());
-  mlir::SymbolRefAttr callee = *callOp.callee();
+  EXPECT_TRUE(callOp.getCallee().has_value());
+  mlir::SymbolRefAttr callee = *callOp.getCallee();
   EXPECT_EQ(fctName, callee.getRootReference().getValue());
   // sourceFile and sourceLine are added arguments.
   if (addLocArgs)
     nbArgs += 2;
-  EXPECT_EQ(nbArgs, callOp.args().size());
+  EXPECT_EQ(nbArgs, callOp.getArgs().size());
 }
 
 /// Check the call operation from the \p result value. In some cases the
@@ -118,6 +138,26 @@ static inline void checkCallOpFromResultBox(mlir::Value result,
   auto convOp = mlir::dyn_cast<fir::ConvertOp>(*u);
   EXPECT_NE(nullptr, convOp);
   checkCallOpFromResultBox(convOp.getResult(), fctName, nbArgs, addLocArgs);
+}
+
+/// Check the operations in \p block for a `fir::CallOp` operation where the
+/// function being called shares its function name with \p fctName and the
+/// number of arguments is equal to \p nbArgs. Note that this check only cares
+/// if the operation exists, and not the order in when the operation is called.
+/// This results in exiting the test as soon as the first correct instance of
+/// `fir::CallOp` is found).
+static inline void checkBlockForCallOp(
+    mlir::Block *block, llvm::StringRef fctName, unsigned nbArgs) {
+  assert(block && "mlir::Block given is a nullptr");
+  for (auto &op : block->getOperations()) {
+    if (auto callOp = mlir::dyn_cast<fir::CallOp>(op)) {
+      if (fctName == callOp.getCallee()->getRootReference().getValue()) {
+        EXPECT_EQ(nbArgs, callOp.getArgs().size());
+        return;
+      }
+    }
+  }
+  FAIL() << "No calls to " << fctName << " were found!";
 }
 
 #endif // FORTRAN_OPTIMIZER_BUILDER_RUNTIME_RUNTIMECALLTESTBASE_H

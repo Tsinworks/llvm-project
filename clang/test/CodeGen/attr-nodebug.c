@@ -1,14 +1,14 @@
 // RUN: %clang_cc1 -debug-info-kind=limited -emit-llvm -o - %s | FileCheck %s
 
-void t1() __attribute__((nodebug));
+void t1(void) __attribute__((nodebug));
 
-void t1()
+void t1(void)
 {
   int a = 10;
   a++;
 }
 
-void t2()
+void t2(void)
 {
   int b = 10;
   b++;
@@ -21,7 +21,7 @@ void t2()
 
 // Verify those things do occur normally.
 // CHECK-LABEL: @t2
-// CHECK:       call{{.*}}llvm.dbg
+// CHECK:       #dbg_declare
 // CHECK:       !dbg
 // CHECK:       }
 

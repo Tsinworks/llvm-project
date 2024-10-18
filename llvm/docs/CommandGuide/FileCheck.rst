@@ -69,10 +69,8 @@ and from the command line.
  This option controls the behavior when using more than one prefix as specified
  by :option:`--check-prefix` or :option:`--check-prefixes`, and some of these
  prefixes are missing in the test file. If true, this is allowed, if false,
- FileCheck will report an error, listing the missing prefixes.
-
- It is currently, temporarily, true by default, and will be subsequently
- switched to false.
+ FileCheck will report an error, listing the missing prefixes. The default value
+ is false.
 
 .. option:: --input-file filename
 
@@ -733,7 +731,7 @@ The first check line matches a regex ``%[a-z]+`` and captures it into the
 string variable ``REGISTER``.  The second line verifies that whatever is in
 ``REGISTER`` occurs later in the file after an "``andw``". :program:`FileCheck`
 string substitution blocks are always contained in ``[[ ]]`` pairs, and string
-variable names can be formed with the regex ``[a-zA-Z_][a-zA-Z0-9_]*``.  If a
+variable names can be formed with the regex ``\$[a-zA-Z_][a-zA-Z0-9_]*``.  If a
 colon follows the name, then it is a definition of the variable; otherwise, it
 is a substitution.
 

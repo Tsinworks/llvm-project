@@ -15,9 +15,9 @@
 #include <type_traits>
 
 // Other libraries and framework includes
-#include "llvm/ADT/Triple.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include "lldb/Core/Module.h"
 #include "lldb/Core/PluginManager.h"
@@ -46,7 +46,7 @@
     DEFINE_REG_NAME(dwarf_num), DEFINE_REG_NAME_STR(str_name),                \
     0, 0, eEncodingInvalid, eFormatDefault,                                   \
     { dwarf_num, dwarf_num, generic_num, LLDB_INVALID_REGNUM, dwarf_num },    \
-    nullptr, nullptr                                                          \
+    nullptr, nullptr, nullptr,                                                \
   }
 
 #define DEFINE_REGISTER_STUB(dwarf_num, str_name) \
@@ -151,10 +151,10 @@ bool ABISysV_arc::IsRegisterFileReduced(RegisterContext &reg_ctx) const {
                                                           /*fail_value*/ 0);
     // RF_BUILD "Number of Entries" bit.
     const uint32_t rf_entries_bit = 1U << 9U;
-    m_is_reg_file_reduced = (reg_value | rf_entries_bit) != 0;
+    m_is_reg_file_reduced = (reg_value & rf_entries_bit) != 0;
   }
 
-  return m_is_reg_file_reduced.getValueOr(false);
+  return m_is_reg_file_reduced.value_or(false);
 }
 
 //------------------------------------------------------------------
@@ -271,7 +271,7 @@ bool ABISysV_arc::PrepareTrivialCall(Thread &thread, addr_t sp, addr_t pc,
         reg_value[byte_index++] = 0;
       }
 
-      RegisterValue reg_val_obj(llvm::makeArrayRef(reg_value, reg_size),
+      RegisterValue reg_val_obj(llvm::ArrayRef(reg_value, reg_size),
                                 eByteOrderLittle);
       if (!reg_ctx->WriteRegister(
             reg_ctx->GetRegisterInfo(eRegisterKindGeneric, reg_index),
@@ -312,13 +312,13 @@ Status ABISysV_arc::SetReturnValueObject(StackFrameSP &frame_sp,
                                          ValueObjectSP &new_value_sp) {
   Status result;
   if (!new_value_sp) {
-    result.SetErrorString("Empty value object for return value.");
+    result = Status::FromErrorString("Empty value object for return value.");
     return result;
   }
 
   CompilerType compiler_type = new_value_sp->GetCompilerType();
   if (!compiler_type) {
-    result.SetErrorString("Null clang type for return value.");
+    result = Status::FromErrorString("Null clang type for return value.");
     return result;
   }
 
@@ -327,7 +327,8 @@ Status ABISysV_arc::SetReturnValueObject(StackFrameSP &frame_sp,
   bool is_signed = false;
   if (!compiler_type.IsIntegerOrEnumerationType(is_signed) &&
       !compiler_type.IsPointerType()) {
-    result.SetErrorString("We don't support returning other types at present");
+    result = Status::FromErrorString(
+        "We don't support returning other types at present");
     return result;
   }
 
@@ -335,7 +336,7 @@ Status ABISysV_arc::SetReturnValueObject(StackFrameSP &frame_sp,
   size_t num_bytes = new_value_sp->GetData(data, result);
 
   if (result.Fail()) {
-    result.SetErrorStringWithFormat(
+    result = Status::FromErrorStringWithFormat(
         "Couldn't convert return value to raw data: %s", result.AsCString());
     return result;
   }
@@ -347,8 +348,8 @@ Status ABISysV_arc::SetReturnValueObject(StackFrameSP &frame_sp,
     auto reg_info =
         reg_ctx.GetRegisterInfo(eRegisterKindGeneric, LLDB_REGNUM_GENERIC_ARG1);
     if (!reg_ctx.WriteRegisterFromUnsigned(reg_info, raw_value)) {
-      result.SetErrorStringWithFormat("Couldn't write value to register %s",
-                                      reg_info->name);
+      result = Status::FromErrorStringWithFormat(
+          "Couldn't write value to register %s", reg_info->name);
       return result;
     }
 
@@ -359,14 +360,14 @@ Status ABISysV_arc::SetReturnValueObject(StackFrameSP &frame_sp,
     reg_info =
         reg_ctx.GetRegisterInfo(eRegisterKindGeneric, LLDB_REGNUM_GENERIC_ARG2);
     if (!reg_ctx.WriteRegisterFromUnsigned(reg_info, raw_value)) {
-      result.SetErrorStringWithFormat("Couldn't write value to register %s",
-                                      reg_info->name);
+      result = Status::FromErrorStringWithFormat(
+          "Couldn't write value to register %s", reg_info->name);
     }
 
     return result;
   }
 
-  result.SetErrorString(
+  result = Status::FromErrorString(
       "We don't support returning large integer values at present.");
   return result;
 }
@@ -458,7 +459,7 @@ ABISysV_arc::GetReturnValueObjectSimple(Thread &thread,
   const uint32_t type_flags = compiler_type.GetTypeInfo();
   // Integer return type.
   if (type_flags & eTypeIsInteger) {
-    const size_t byte_size = compiler_type.GetByteSize(&thread).getValueOr(0);
+    const size_t byte_size = compiler_type.GetByteSize(&thread).value_or(0);
     auto raw_value = ReadRawValue(reg_ctx, byte_size);
 
     const bool is_signed = (type_flags & eTypeIsSigned) != 0;
@@ -482,7 +483,7 @@ ABISysV_arc::GetReturnValueObjectSimple(Thread &thread,
 
     if (compiler_type.IsFloatingPointType(float_count, is_complex) &&
         1 == float_count && !is_complex) {
-      const size_t byte_size = compiler_type.GetByteSize(&thread).getValueOr(0);
+      const size_t byte_size = compiler_type.GetByteSize(&thread).value_or(0);
       auto raw_value = ReadRawValue(reg_ctx, byte_size);
 
       if (!SetSizedFloat(value.GetScalar(), raw_value, byte_size))

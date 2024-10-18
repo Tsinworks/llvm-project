@@ -1,9 +1,7 @@
-// REQUIRES: clang-driver
-// REQUIRES: x86-registered-target
 // UNSUPPORTED: system-windows
 
 // RUN: %clang -### -x hip -target x86_64-linux-gnu --offload=spirv64 \
-// RUN:   -fgpu-rdc --hip-path=%S/Inputs/hipspv -nohipwrapperinc \
+// RUN:   --no-offload-new-driver -fgpu-rdc --hip-path=%S/Inputs/hipspv -nohipwrapperinc \
 // RUN:   %S/Inputs/hip_multiple_inputs/a.cu \
 // RUN:   %S/Inputs/hip_multiple_inputs/b.hip \
 // RUN: 2>&1 | FileCheck %s
@@ -28,7 +26,7 @@
 // CHECK-SAME: "-aux-triple" "x86_64-unknown-linux-gnu"
 // CHECK-SAME: "-emit-llvm-bc"
 // CHECK-SAME: "-fcuda-is-device" "-fcuda-allow-variadic-functions"
-// CHECK-SAME: "-fvisibility" "hidden" "-fapply-global-visibility-to-externs"
+// CHECK-SAME: "-fvisibility=hidden" "-fapply-global-visibility-to-externs"
 // CHECK-SAME: "-fgpu-rdc"
 // CHECK-SAME: {{.*}} "-o" [[A_BC1:".*bc"]] "-x" "hip"
 // CHECK-SAME: {{.*}} [[A_SRC]]
@@ -37,7 +35,7 @@
 // CHECK-SAME: "-aux-triple" "x86_64-unknown-linux-gnu"
 // CHECK-SAME: "-emit-llvm-bc"
 // CHECK-SAME: "-fcuda-is-device" "-fcuda-allow-variadic-functions"
-// CHECK-SAME: "-fvisibility" "hidden" "-fapply-global-visibility-to-externs"
+// CHECK-SAME: "-fvisibility=hidden" "-fapply-global-visibility-to-externs"
 // CHECK-SAME: "-fgpu-rdc"
 // CHECK-SAME: {{.*}} "-o" [[B_BC1:".*bc"]] "-x" "hip"
 // CHECK-SAME: {{.*}} [[B_SRC]]
@@ -53,10 +51,9 @@
 // Construct fat binary object.
 // CHECK: [[BUNDLER:".*clang-offload-bundler"]] "-type=o" "-bundle-align=4096"
 // CHECK-SAME: "-targets={{.*}},hip-spirv64----generic"
-// CHECK-SAME: "-inputs=/dev/null,[[AB_SPIRV]]"
-// CHECK-SAME: "-outputs=[[AB_FATBIN:.*hipfb]]"
-// CHECK: {{".*llvm-mc.*"}} "-o" [[OBJBUNDLE:".*o"]] "{{.*}}.mcin"
-// CHECK-SAME: "--filetype=obj"
+// CHECK-SAME: "-input=/dev/null" "-input=[[AB_SPIRV]]"
+// CHECK-SAME: "-output=[[AB_FATBIN:.*hipfb]]"
+// CHECK: {{".*clang.*"}} "-o" [[OBJBUNDLE:".*o"]] "{{.*}}.mcin"
 
 // Output the executable
 // CHECK: {{".*ld.*"}} {{.*}}"-o" "a.out" {{.*}} [[A_OBJ_HOST]] [[B_OBJ_HOST]]

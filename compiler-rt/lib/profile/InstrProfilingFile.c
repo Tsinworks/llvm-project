@@ -101,20 +101,27 @@ static const int UseBiasVar = 0;
 static const char *FileOpenMode = "a+b";
 static void *BiasAddr = NULL;
 static void *BiasDefaultAddr = NULL;
+static void *BitmapBiasAddr = NULL;
+static void *BitmapBiasDefaultAddr = NULL;
 static int mmapForContinuousMode(uint64_t CurrentFileOffset, FILE *File) {
   /* Get the sizes of various profile data sections. Taken from
    * __llvm_profile_get_size_for_buffer(). */
   const __llvm_profile_data *DataBegin = __llvm_profile_begin_data();
   const __llvm_profile_data *DataEnd = __llvm_profile_end_data();
-  const uint64_t *CountersBegin = __llvm_profile_begin_counters();
-  const uint64_t *CountersEnd = __llvm_profile_end_counters();
+  const char *CountersBegin = __llvm_profile_begin_counters();
+  const char *CountersEnd = __llvm_profile_end_counters();
+  const char *BitmapBegin = __llvm_profile_begin_bitmap();
+  const char *BitmapEnd = __llvm_profile_end_bitmap();
   const char *NamesBegin = __llvm_profile_begin_names();
   const char *NamesEnd = __llvm_profile_end_names();
   const uint64_t NamesSize = (NamesEnd - NamesBegin) * sizeof(char);
   uint64_t DataSize = __llvm_profile_get_data_size(DataBegin, DataEnd);
-  uint64_t CountersSize = CountersEnd - CountersBegin;
+  uint64_t CountersSize =
+      __llvm_profile_get_counters_size(CountersBegin, CountersEnd);
+  uint64_t NumBitmapBytes =
+      __llvm_profile_get_num_bitmap_bytes(BitmapBegin, BitmapEnd);
 
-  /* Check that the counter and data sections in this image are
+  /* Check that the counter, bitmap, and data sections in this image are
    * page-aligned. */
   unsigned PageSize = getpagesize();
   if ((intptr_t)CountersBegin % PageSize != 0) {
@@ -122,28 +129,36 @@ static int mmapForContinuousMode(uint64_t CurrentFileOffset, FILE *File) {
              CountersBegin, PageSize);
     return 1;
   }
+  if ((intptr_t)BitmapBegin % PageSize != 0) {
+    PROF_ERR("Bitmap section not page-aligned (start = %p, pagesz = %u).\n",
+             BitmapBegin, PageSize);
+    return 1;
+  }
   if ((intptr_t)DataBegin % PageSize != 0) {
     PROF_ERR("Data section not page-aligned (start = %p, pagesz = %u).\n",
              DataBegin, PageSize);
     return 1;
   }
+
   int Fileno = fileno(File);
   /* Determine how much padding is needed before/after the counters and
    * after the names. */
   uint64_t PaddingBytesBeforeCounters, PaddingBytesAfterCounters,
-      PaddingBytesAfterNames;
+      PaddingBytesAfterNames, PaddingBytesAfterBitmapBytes,
+      PaddingBytesAfterVTable, PaddingBytesAfterVNames;
   __llvm_profile_get_padding_sizes_for_counters(
-      DataSize, CountersSize, NamesSize, &PaddingBytesBeforeCounters,
-      &PaddingBytesAfterCounters, &PaddingBytesAfterNames);
+      DataSize, CountersSize, NumBitmapBytes, NamesSize, /*VTableSize=*/0,
+      /*VNameSize=*/0, &PaddingBytesBeforeCounters, &PaddingBytesAfterCounters,
+      &PaddingBytesAfterBitmapBytes, &PaddingBytesAfterNames,
+      &PaddingBytesAfterVTable, &PaddingBytesAfterVNames);
 
-  uint64_t PageAlignedCountersLength =
-      (CountersSize * sizeof(uint64_t)) + PaddingBytesAfterCounters;
-  uint64_t FileOffsetToCounters =
-      CurrentFileOffset + sizeof(__llvm_profile_header) +
-      (DataSize * sizeof(__llvm_profile_data)) + PaddingBytesBeforeCounters;
-  uint64_t *CounterMmap = (uint64_t *)mmap(
-      (void *)CountersBegin, PageAlignedCountersLength, PROT_READ | PROT_WRITE,
-      MAP_FIXED | MAP_SHARED, Fileno, FileOffsetToCounters);
+  uint64_t PageAlignedCountersLength = CountersSize + PaddingBytesAfterCounters;
+  uint64_t FileOffsetToCounters = CurrentFileOffset +
+                                  sizeof(__llvm_profile_header) + DataSize +
+                                  PaddingBytesBeforeCounters;
+  void *CounterMmap = mmap((void *)CountersBegin, PageAlignedCountersLength,
+                           PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED,
+                           Fileno, FileOffsetToCounters);
   if (CounterMmap != CountersBegin) {
     PROF_ERR(
         "Continuous counter sync mode is enabled, but mmap() failed (%s).\n"
@@ -155,18 +170,46 @@ static int mmapForContinuousMode(uint64_t CurrentFileOffset, FILE *File) {
         FileOffsetToCounters);
     return 1;
   }
+
+  /* Also mmap MCDC bitmap bytes. If there aren't any bitmap bytes, mmap()
+   * will fail with EINVAL. */
+  if (NumBitmapBytes == 0)
+    return 0;
+
+  uint64_t PageAlignedBitmapLength =
+      NumBitmapBytes + PaddingBytesAfterBitmapBytes;
+  uint64_t FileOffsetToBitmap =
+      FileOffsetToCounters + CountersSize + PaddingBytesAfterCounters;
+  void *BitmapMmap =
+      mmap((void *)BitmapBegin, PageAlignedBitmapLength, PROT_READ | PROT_WRITE,
+           MAP_FIXED | MAP_SHARED, Fileno, FileOffsetToBitmap);
+  if (BitmapMmap != BitmapBegin) {
+    PROF_ERR(
+        "Continuous counter sync mode is enabled, but mmap() failed (%s).\n"
+        "  - BitmapBegin: %p\n"
+        "  - PageAlignedBitmapLength: %" PRIu64 "\n"
+        "  - Fileno: %d\n"
+        "  - FileOffsetToBitmap: %" PRIu64 "\n",
+        strerror(errno), BitmapBegin, PageAlignedBitmapLength, Fileno,
+        FileOffsetToBitmap);
+    return 1;
+  }
   return 0;
 }
-#elif defined(__ELF__) || defined(_WIN32)
+#elif defined(__ELF__) || defined(_WIN32) || defined(_AIX)
 
 #define INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR                            \
   INSTR_PROF_CONCAT(INSTR_PROF_PROFILE_COUNTER_BIAS_VAR, _default)
-intptr_t INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR = 0;
+COMPILER_RT_VISIBILITY int64_t INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR = 0;
+#define INSTR_PROF_PROFILE_BITMAP_BIAS_DEFAULT_VAR                             \
+  INSTR_PROF_CONCAT(INSTR_PROF_PROFILE_BITMAP_BIAS_VAR, _default)
+COMPILER_RT_VISIBILITY int64_t INSTR_PROF_PROFILE_BITMAP_BIAS_DEFAULT_VAR = 0;
 
 /* This variable is a weak external reference which could be used to detect
  * whether or not the compiler defined this symbol. */
 #if defined(_MSC_VER)
-COMPILER_RT_VISIBILITY extern intptr_t INSTR_PROF_PROFILE_COUNTER_BIAS_VAR;
+COMPILER_RT_VISIBILITY extern int64_t INSTR_PROF_PROFILE_COUNTER_BIAS_VAR;
+COMPILER_RT_VISIBILITY extern int64_t INSTR_PROF_PROFILE_BITMAP_BIAS_VAR;
 #if defined(_M_IX86) || defined(__i386__)
 #define WIN_SYM_PREFIX "_"
 #else
@@ -176,10 +219,17 @@ COMPILER_RT_VISIBILITY extern intptr_t INSTR_PROF_PROFILE_COUNTER_BIAS_VAR;
     linker, "/alternatename:" WIN_SYM_PREFIX INSTR_PROF_QUOTE(                 \
                 INSTR_PROF_PROFILE_COUNTER_BIAS_VAR) "=" WIN_SYM_PREFIX        \
                 INSTR_PROF_QUOTE(INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR))
+#pragma comment(                                                               \
+    linker, "/alternatename:" WIN_SYM_PREFIX INSTR_PROF_QUOTE(                 \
+                INSTR_PROF_PROFILE_BITMAP_BIAS_VAR) "=" WIN_SYM_PREFIX         \
+                INSTR_PROF_QUOTE(INSTR_PROF_PROFILE_BITMAP_BIAS_DEFAULT_VAR))
 #else
-COMPILER_RT_VISIBILITY extern intptr_t INSTR_PROF_PROFILE_COUNTER_BIAS_VAR
+COMPILER_RT_VISIBILITY extern int64_t INSTR_PROF_PROFILE_COUNTER_BIAS_VAR
     __attribute__((weak, alias(INSTR_PROF_QUOTE(
                              INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR))));
+COMPILER_RT_VISIBILITY extern int64_t INSTR_PROF_PROFILE_BITMAP_BIAS_VAR
+    __attribute__((weak, alias(INSTR_PROF_QUOTE(
+                             INSTR_PROF_PROFILE_BITMAP_BIAS_DEFAULT_VAR))));
 #endif
 static const int ContinuousModeSupported = 1;
 static const int UseBiasVar = 1;
@@ -190,35 +240,62 @@ static const char *FileOpenMode = "w+b";
  * used and runtime provides a weak alias so we can check if it's defined. */
 static void *BiasAddr = &INSTR_PROF_PROFILE_COUNTER_BIAS_VAR;
 static void *BiasDefaultAddr = &INSTR_PROF_PROFILE_COUNTER_BIAS_DEFAULT_VAR;
+static void *BitmapBiasAddr = &INSTR_PROF_PROFILE_BITMAP_BIAS_VAR;
+static void *BitmapBiasDefaultAddr =
+    &INSTR_PROF_PROFILE_BITMAP_BIAS_DEFAULT_VAR;
 static int mmapForContinuousMode(uint64_t CurrentFileOffset, FILE *File) {
   /* Get the sizes of various profile data sections. Taken from
    * __llvm_profile_get_size_for_buffer(). */
   const __llvm_profile_data *DataBegin = __llvm_profile_begin_data();
   const __llvm_profile_data *DataEnd = __llvm_profile_end_data();
-  const uint64_t *CountersBegin = __llvm_profile_begin_counters();
-  const uint64_t *CountersEnd = __llvm_profile_end_counters();
+  const char *CountersBegin = __llvm_profile_begin_counters();
+  const char *CountersEnd = __llvm_profile_end_counters();
+  const char *BitmapBegin = __llvm_profile_begin_bitmap();
+  const char *BitmapEnd = __llvm_profile_end_bitmap();
   uint64_t DataSize = __llvm_profile_get_data_size(DataBegin, DataEnd);
+  uint64_t CountersSize =
+      __llvm_profile_get_counters_size(CountersBegin, CountersEnd);
+  uint64_t NumBitmapBytes =
+      __llvm_profile_get_num_bitmap_bytes(BitmapBegin, BitmapEnd);
   /* Get the file size. */
   uint64_t FileSize = 0;
   if (getProfileFileSizeForMerging(File, &FileSize))
     return 1;
 
+  int Fileno = fileno(File);
+  uint64_t PaddingBytesAfterCounters =
+      __llvm_profile_get_num_padding_bytes(CountersSize);
+  uint64_t FileOffsetToCounters =
+      sizeof(__llvm_profile_header) + __llvm_write_binary_ids(NULL) + DataSize;
+
   /* Map the profile. */
   char *Profile = (char *)mmap(NULL, FileSize, PROT_READ | PROT_WRITE,
-                               MAP_SHARED, fileno(File), 0);
+                               MAP_SHARED, Fileno, 0);
   if (Profile == MAP_FAILED) {
     PROF_ERR("Unable to mmap profile: %s\n", strerror(errno));
     return 1;
   }
-  const uint64_t CountersOffsetInBiasMode =
-      sizeof(__llvm_profile_header) + __llvm_write_binary_ids(NULL) +
-      (DataSize * sizeof(__llvm_profile_data));
   /* Update the profile fields based on the current mapping. */
   INSTR_PROF_PROFILE_COUNTER_BIAS_VAR =
-      (intptr_t)Profile - (uintptr_t)CountersBegin + CountersOffsetInBiasMode;
+      (intptr_t)Profile - (uintptr_t)CountersBegin + FileOffsetToCounters;
 
   /* Return the memory allocated for counters to OS. */
   lprofReleaseMemoryPagesToOS((uintptr_t)CountersBegin, (uintptr_t)CountersEnd);
+
+  /* Also mmap MCDC bitmap bytes. If there aren't any bitmap bytes, mmap()
+   * will fail with EINVAL. */
+  if (NumBitmapBytes == 0)
+    return 0;
+
+  /* Update profbm_bias. */
+  uint64_t FileOffsetToBitmap =
+      FileOffsetToCounters + CountersSize + PaddingBytesAfterCounters;
+  /* Update the profile fields based on the current mapping. */
+  INSTR_PROF_PROFILE_BITMAP_BIAS_VAR =
+      (uintptr_t)Profile - (uintptr_t)BitmapBegin + FileOffsetToBitmap;
+
+  /* Return the memory allocated for counters to OS. */
+  lprofReleaseMemoryPagesToOS((uintptr_t)BitmapBegin, (uintptr_t)BitmapEnd);
   return 0;
 }
 #else
@@ -227,23 +304,25 @@ static const int UseBiasVar = 0;
 static const char *FileOpenMode = "a+b";
 static void *BiasAddr = NULL;
 static void *BiasDefaultAddr = NULL;
+static void *BitmapBiasAddr = NULL;
+static void *BitmapBiasDefaultAddr = NULL;
 static int mmapForContinuousMode(uint64_t CurrentFileOffset, FILE *File) {
   return 0;
 }
 #endif
 
-static int isProfileMergeRequested() { return ProfileMergeRequested; }
+static int isProfileMergeRequested(void) { return ProfileMergeRequested; }
 static void setProfileMergeRequested(int EnableMerge) {
   ProfileMergeRequested = EnableMerge;
 }
 
 static FILE *ProfileFile = NULL;
-static FILE *getProfileFile() { return ProfileFile; }
+static FILE *getProfileFile(void) { return ProfileFile; }
 static void setProfileFile(FILE *File) { ProfileFile = File; }
 
-static int getCurFilenameLength();
+static int getCurFilenameLength(void);
 static const char *getCurFilename(char *FilenameBuf, int ForceUseBuf);
-static unsigned doMerging() {
+static unsigned doMerging(void) {
   return lprofCurFilename.MergePoolSize || isProfileMergeRequested();
 }
 
@@ -294,17 +373,17 @@ static void initFileWriter(ProfDataWriter *This, FILE *File) {
 COMPILER_RT_VISIBILITY ProfBufferIO *
 lprofCreateBufferIOInternal(void *File, uint32_t BufferSz) {
   FreeHook = &free;
-  DynamicBufferIOBuffer = (uint8_t *)calloc(BufferSz, 1);
+  DynamicBufferIOBuffer = (uint8_t *)calloc(1, BufferSz);
   VPBufferSize = BufferSz;
   ProfDataWriter *fileWriter =
-      (ProfDataWriter *)calloc(sizeof(ProfDataWriter), 1);
+      (ProfDataWriter *)calloc(1, sizeof(ProfDataWriter));
   initFileWriter(fileWriter, File);
   ProfBufferIO *IO = lprofCreateBufferIO(fileWriter);
   IO->OwnFileWriter = 1;
   return IO;
 }
 
-static void setupIOBuffer() {
+static void setupIOBuffer(void) {
   const char *BufferSzStr = 0;
   BufferSzStr = getenv("LLVM_VP_BUFFER_SIZE");
   if (BufferSzStr && BufferSzStr[0]) {
@@ -425,13 +504,15 @@ static void createProfileDir(const char *Filename) {
  * its instrumented shared libraries dump profile data into their own data file.
 */
 static FILE *openFileForMerging(const char *ProfileFileName, int *MergeDone) {
-  FILE *ProfileFile = NULL;
+  FILE *ProfileFile = getProfileFile();
   int rc;
-
-  ProfileFile = getProfileFile();
-  if (ProfileFile) {
+  // initializeProfileForContinuousMode will lock the profile, but if
+  // ProfileFile is set by user via __llvm_profile_set_file_object, it's assumed
+  // unlocked at this point.
+  if (ProfileFile && !__llvm_profile_is_continuous_mode_enabled()) {
     lprofLockFileHandle(ProfileFile);
-  } else {
+  }
+  if (!ProfileFile) {
     createProfileDir(ProfileFileName);
     ProfileFile = lprofOpenFileEx(ProfileFileName);
   }
@@ -482,7 +563,7 @@ static int writeFile(const char *OutputName) {
 
   if (OutputFile == getProfileFile()) {
     fflush(OutputFile);
-    if (doMerging()) {
+    if (doMerging() && !__llvm_profile_is_continuous_mode_enabled()) {
       lprofUnlockFileHandle(OutputFile);
     }
   } else {
@@ -572,15 +653,16 @@ static void initializeProfileForContinuousMode(void) {
     PROF_ERR("%s\n", "continuous mode is unsupported on this platform");
     return;
   }
-  if (UseBiasVar && BiasAddr == BiasDefaultAddr) {
-    PROF_ERR("%s\n", "__llvm_profile_counter_bias is undefined");
+  if (UseBiasVar && BiasAddr == BiasDefaultAddr &&
+      BitmapBiasAddr == BitmapBiasDefaultAddr) {
+    PROF_ERR("%s\n", "Neither __llvm_profile_counter_bias nor "
+                     "__llvm_profile_bitmap_bias is defined");
     return;
   }
 
   /* Get the sizes of counter section. */
-  const uint64_t *CountersBegin = __llvm_profile_begin_counters();
-  const uint64_t *CountersEnd = __llvm_profile_end_counters();
-  uint64_t CountersSize = CountersEnd - CountersBegin;
+  uint64_t CountersSize = __llvm_profile_get_counters_size(
+      __llvm_profile_begin_counters(), __llvm_profile_end_counters());
 
   int Length = getCurFilenameLength();
   char *FilenameBuf = (char *)COMPILER_RT_ALLOCA(Length + 1);
@@ -635,6 +717,7 @@ static void initializeProfileForContinuousMode(void) {
       PROF_ERR("Continuous counter sync mode is enabled, but raw profile is not"
                "page-aligned. CurrentFileOffset = %" PRIu64 ", pagesz = %u.\n",
                (uint64_t)CurrentFileOffset, PageSize);
+      fclose(File);
       return;
     }
     if (writeProfileWithFileObject(Filename, File) != 0) {
@@ -650,6 +733,8 @@ static void initializeProfileForContinuousMode(void) {
 
   if (doMerging()) {
     lprofUnlockFileHandle(File);
+  }
+  if (File != NULL) {
     fclose(File);
   }
 }
@@ -657,7 +742,19 @@ static void initializeProfileForContinuousMode(void) {
 static const char *DefaultProfileName = "default.profraw";
 static void resetFilenameToDefault(void) {
   if (lprofCurFilename.FilenamePat && lprofCurFilename.OwnsFilenamePat) {
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
+#endif
     free((void *)lprofCurFilename.FilenamePat);
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
   }
   memset(&lprofCurFilename, 0, sizeof(lprofCurFilename));
   lprofCurFilename.FilenamePat = DefaultProfileName;
@@ -699,6 +796,13 @@ static int parseFilenamePattern(const char *FilenamePat,
   int MergingEnabled = 0;
   int FilenamePatLen = strlen(FilenamePat);
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
+#endif
   /* Clean up cached prefix and filename.  */
   if (lprofCurFilename.ProfilePathPrefix)
     free((void *)lprofCurFilename.ProfilePathPrefix);
@@ -706,6 +810,11 @@ static int parseFilenamePattern(const char *FilenamePat,
   if (lprofCurFilename.FilenamePat && lprofCurFilename.OwnsFilenamePat) {
     free((void *)lprofCurFilename.FilenamePat);
   }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
   memset(&lprofCurFilename, 0, sizeof(lprofCurFilename));
 
@@ -750,9 +859,10 @@ static int parseFilenamePattern(const char *FilenamePat,
         if (__llvm_profile_is_continuous_mode_enabled()) {
           PROF_WARN("%%c specifier can only be specified once in %s.\n",
                     FilenamePat);
+          __llvm_profile_disable_continuous_mode();
           return -1;
         }
-#if defined(__APPLE__) || defined(__ELF__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(__ELF__) || defined(_WIN32) || defined(_AIX)
         __llvm_profile_set_page_size(getpagesize());
         __llvm_profile_enable_continuous_mode();
 #else
@@ -824,7 +934,7 @@ static void parseAndSetFilename(const char *FilenamePat,
  * filename with PID and hostname substitutions. */
 /* The length to hold uint64_t followed by 3 digits pool id including '_' */
 #define SIGLEN 24
-static int getCurFilenameLength() {
+static int getCurFilenameLength(void) {
   int Len;
   if (!lprofCurFilename.FilenamePat || !lprofCurFilename.FilenamePat[0])
     return 0;
@@ -1020,10 +1130,14 @@ int __llvm_profile_write_file(void) {
   int rc, Length;
   const char *Filename;
   char *FilenameBuf;
-  int PDeathSig = 0;
+
+  // Temporarily suspend getting SIGKILL when the parent exits.
+  int PDeathSig = lprofSuspendSigKill();
 
   if (lprofProfileDumped() || __llvm_profile_is_continuous_mode_enabled()) {
     PROF_NOTE("Profile data not written to file: %s.\n", "already written");
+    if (PDeathSig == 1)
+      lprofRestoreSigKill();
     return 0;
   }
 
@@ -1034,6 +1148,8 @@ int __llvm_profile_write_file(void) {
   /* Check the filename. */
   if (!Filename) {
     PROF_ERR("Failed to write file : %s\n", "Filename not set");
+    if (PDeathSig == 1)
+      lprofRestoreSigKill();
     return -1;
   }
 
@@ -1043,11 +1159,10 @@ int __llvm_profile_write_file(void) {
              "expected %d, but get %d\n",
              INSTR_PROF_RAW_VERSION,
              (int)GET_VERSION(__llvm_profile_get_version()));
+    if (PDeathSig == 1)
+      lprofRestoreSigKill();
     return -1;
   }
-
-  // Temporarily suspend getting SIGKILL when the parent exits.
-  PDeathSig = lprofSuspendSigKill();
 
   /* Write profile data to the file. */
   rc = writeFile(Filename);
@@ -1081,7 +1196,9 @@ int __llvm_orderfile_write_file(void) {
   int rc, Length, LengthBeforeAppend, SuffixLength;
   const char *Filename;
   char *FilenameBuf;
-  int PDeathSig = 0;
+
+  // Temporarily suspend getting SIGKILL when the parent exits.
+  int PDeathSig = lprofSuspendSigKill();
 
   SuffixLength = strlen(OrderFileSuffix);
   Length = getCurFilenameLength() + SuffixLength;
@@ -1091,6 +1208,8 @@ int __llvm_orderfile_write_file(void) {
   /* Check the filename. */
   if (!Filename) {
     PROF_ERR("Failed to write file : %s\n", "Filename not set");
+    if (PDeathSig == 1)
+      lprofRestoreSigKill();
     return -1;
   }
 
@@ -1105,11 +1224,10 @@ int __llvm_orderfile_write_file(void) {
              "expected %d, but get %d\n",
              INSTR_PROF_RAW_VERSION,
              (int)GET_VERSION(__llvm_profile_get_version()));
+    if (PDeathSig == 1)
+      lprofRestoreSigKill();
     return -1;
   }
-
-  // Temporarily suspend getting SIGKILL when the parent exits.
-  PDeathSig = lprofSuspendSigKill();
 
   /* Write order data to the file. */
   rc = writeOrderFile(Filename);
@@ -1141,7 +1259,7 @@ int __llvm_profile_register_write_file_atexit(void) {
   lprofSetupValueProfiler();
 
   HasBeenRegistered = 1;
-  return atexit(writeFileWithoutReturn);
+  return lprofAtExit(writeFileWithoutReturn);
 }
 
 COMPILER_RT_VISIBILITY int __llvm_profile_set_file_object(FILE *File,

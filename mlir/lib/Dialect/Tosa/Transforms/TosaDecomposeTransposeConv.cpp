@@ -1,5 +1,4 @@
-//===- TosaDecomposeTransposeConv.cpp
-//------------------------------------------===//
+//===- TosaDecomposeTransposeConv.cpp -------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,78 +6,27 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Insert reshape to binary op's input if needed to match rank
+// Decompose TOSA TransposeConv operation to a series of TOSA Ops specifically
+// (1) Convert a Dilated TransposeConv2D to Conv2D including reversing/reshaping
+// etc.. of the weights (2) Convert a Strided TransposeConv2D to Conv2D
+// including transposing/reversing/reshaping etc..
+//     of the weights and input/output tenors and reversing/reshaping etc .. of
+//     the weights
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/Dialect/Tosa/IR//TosaOps.h"
-#include "mlir/Dialect/Tosa/Transforms/PassDetail.h"
+#include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Tosa/Transforms/Passes.h"
+#include "mlir/Dialect/Tosa/Utils/ConversionUtils.h"
 #include "mlir/Dialect/Tosa/Utils/ShapeUtils.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace mlir;
 using namespace mlir::tosa;
 
 namespace {
 
-template <typename T>
-static void getValuesFromIntArrayAttribute(ArrayAttr attr,
-                                           SmallVector<T> &arrayValues) {
-  for (Attribute val : attr.getValue()) {
-    arrayValues.push_back(val.cast<IntegerAttr>().getValue().getSExtValue());
-  }
-}
-
-template <typename TosaOp, typename... Args>
-TosaOp createOpAndInfer(PatternRewriter &rewriter, Location loc, Type resultTy,
-                        Args &&...args) {
-  auto op = rewriter.create<TosaOp>(loc, resultTy, args...);
-
-  InferShapedTypeOpInterface shapeInterface =
-      dyn_cast<InferShapedTypeOpInterface>(op.getOperation());
-  if (!shapeInterface)
-    return op;
-
-  SmallVector<ShapedTypeComponents> returnedShapes;
-  if (shapeInterface
-          .inferReturnTypeComponents(op.getContext(), op.getLoc(),
-                                     op->getOperands(), op->getAttrDictionary(),
-                                     op->getRegions(), returnedShapes)
-          .failed())
-    return op;
-
-  // We need to use the element type of the existing result type to generate
-  // the new result shaped type. This is because rescale can include a cast to
-  // different bit-width types and does not have a TypeAttr to define the
-  // target type.
-  auto result = op->getResult(0);
-  auto predictedShape = returnedShapes[0];
-  auto currentKnowledge =
-      mlir::tosa::ValueKnowledge::getKnowledgeFromType(resultTy);
-
-  // Compute the knowledge based on the inferred type.
-  auto inferredKnowledge =
-      mlir::tosa::ValueKnowledge::getPessimisticValueState();
-  inferredKnowledge.dtype = resultTy.cast<ShapedType>().getElementType();
-  inferredKnowledge.hasRank = predictedShape.hasRank();
-  if (predictedShape.hasRank()) {
-    for (auto dim : predictedShape.getDims()) {
-      inferredKnowledge.sizes.push_back(dim);
-    }
-  }
-
-  // Compute the new type based on the joined version.
-  auto newKnowledge =
-      mlir::tosa::ValueKnowledge::join(currentKnowledge, inferredKnowledge);
-  auto newTy = newKnowledge.getType();
-  result.setType(newTy);
-  return op;
-}
-
-class TransposeConvDilatedConverter
+class TransposeConvNonStridedConverter
     : public OpRewritePattern<tosa::TransposeConv2DOp> {
 public:
   using OpRewritePattern<tosa::TransposeConv2DOp>::OpRewritePattern;
@@ -89,18 +37,13 @@ public:
     Value weight = op->getOperand(1);
     Value bias = op->getOperand(2);
 
-    ShapedType inputTy = input.getType().cast<ShapedType>();
-    ShapedType weightTy = weight.getType().cast<ShapedType>();
-    ShapedType biasTy = bias.getType().cast<ShapedType>();
-    ShapedType resultTy = op->getResult(0).getType().cast<ShapedType>();
+    ShapedType inputTy = cast<ShapedType>(input.getType());
+    ShapedType weightTy = cast<ShapedType>(weight.getType());
+    ShapedType biasTy = cast<ShapedType>(bias.getType());
+    ShapedType resultTy = cast<ShapedType>(op->getResult(0).getType());
 
-    llvm::SmallVector<int64_t> pad;
-    llvm::SmallVector<int64_t> stride;
-    llvm::SmallVector<int64_t> dilation;
-
-    getValuesFromIntArrayAttribute(op.out_pad().cast<ArrayAttr>(), pad);
-    getValuesFromIntArrayAttribute(op.stride().cast<ArrayAttr>(), stride);
-    getValuesFromIntArrayAttribute(op.dilation().cast<ArrayAttr>(), dilation);
+    llvm::ArrayRef<int64_t> stride = op.getStride();
+    llvm::ArrayRef<int64_t> pad = op.getOutPad();
 
     // If striding is all 1 we can modify padding and reverse the kernel along
     // the x/y direction to make it a regular convolution. This is much simpler
@@ -112,34 +55,33 @@ public:
         !biasTy.hasStaticShape() || !resultTy.hasStaticShape())
       return failure();
 
-    int64_t kernelHeight = (weightTy.getDimSize(1) - 1) * dilation[0] + 1;
-    int64_t kernelWidth = (weightTy.getDimSize(2) - 1) * dilation[1] + 1;
-    int64_t requiredInputHeight = resultTy.getDimSize(1) + kernelHeight - 1;
-    int64_t requiredInputWidth = resultTy.getDimSize(2) + kernelWidth - 1;
+    int64_t kernelHeight = weightTy.getDimSize(1);
+    int64_t kernelWidth = weightTy.getDimSize(2);
 
     llvm::SmallVector<int64_t> convPad(4, 0);
-    convPad[0] = kernelHeight - 1 - pad[0];
-    convPad[2] = kernelWidth - 1 - pad[1];
-    convPad[1] = requiredInputHeight - convPad[0] - inputTy.getDimSize(1);
-    convPad[3] = requiredInputWidth - convPad[2] - inputTy.getDimSize(2);
+    convPad[0] = kernelHeight - 1 + pad[0];
+    convPad[1] = kernelHeight - 1 + pad[1];
+    convPad[2] = kernelWidth - 1 + pad[2];
+    convPad[3] = kernelWidth - 1 + pad[3];
 
     auto reverse1 = rewriter.create<tosa::ReverseOp>(
-        loc, weightTy, weight, rewriter.getI64IntegerAttr(1));
+        loc, weightTy, weight, /* axis = */ rewriter.getI32IntegerAttr(1));
     auto reverse2 = rewriter.create<tosa::ReverseOp>(
-        loc, weightTy, reverse1, rewriter.getI64IntegerAttr(2));
+        loc, weightTy, reverse1, /* axis = */ rewriter.getI32IntegerAttr(2));
 
     Value conv2d;
-    if (op.quantization_info().hasValue()) {
+    if (op.getQuantizationInfo()) {
       conv2d = rewriter.create<tosa::Conv2DOp>(
           loc, resultTy, input, reverse2, bias,
-          rewriter.getI64ArrayAttr(convPad), rewriter.getI64ArrayAttr(stride),
-          rewriter.getI64ArrayAttr(dilation),
-          op.quantization_info().getValue());
+          rewriter.getDenseI64ArrayAttr(convPad),
+          rewriter.getDenseI64ArrayAttr(stride),
+          rewriter.getDenseI64ArrayAttr({1, 1}), *op.getQuantizationInfo());
     } else {
       conv2d = rewriter.create<tosa::Conv2DOp>(
           loc, resultTy, input, reverse2, bias,
-          rewriter.getI64ArrayAttr(convPad), rewriter.getI64ArrayAttr(stride),
-          rewriter.getI64ArrayAttr(dilation));
+          rewriter.getDenseI64ArrayAttr(convPad),
+          rewriter.getDenseI64ArrayAttr(stride),
+          rewriter.getDenseI64ArrayAttr({1, 1}));
     }
 
     rewriter.replaceOp(op, conv2d);
@@ -158,33 +100,26 @@ public:
     Value weight = op->getOperand(1);
     Value bias = op->getOperand(2);
 
-    ShapedType inputTy = input.getType().cast<ShapedType>();
-    ShapedType weightTy = weight.getType().cast<ShapedType>();
-    ShapedType biasTy = bias.getType().cast<ShapedType>();
-    ShapedType resultTy = op->getResult(0).getType().cast<ShapedType>();
+    ShapedType inputTy = cast<ShapedType>(input.getType());
+    ShapedType weightTy = cast<ShapedType>(weight.getType());
+    ShapedType biasTy = cast<ShapedType>(bias.getType());
+    ShapedType resultTy = cast<ShapedType>(op->getResult(0).getType());
 
     Type inputETy = inputTy.getElementType();
     Type weightETy = weightTy.getElementType();
     Type biasETy = biasTy.getElementType();
     Type resultETy = resultTy.getElementType();
 
-    llvm::SmallVector<int64_t> pad;
-    llvm::SmallVector<int64_t> stride;
-    llvm::SmallVector<int64_t> dilation;
-
-    getValuesFromIntArrayAttribute(op.out_pad().cast<ArrayAttr>(), pad);
-    getValuesFromIntArrayAttribute(op.stride().cast<ArrayAttr>(), stride);
-    getValuesFromIntArrayAttribute(op.dilation().cast<ArrayAttr>(), dilation);
+    llvm::ArrayRef<int64_t> pad = op.getOutPad();
+    llvm::ArrayRef<int64_t> stride = op.getStride();
 
     // If striding is all 1 we can modify padding and reverse the kernel along
     // the x/y direction to make it a regular convolution. This is much simpler
     // then handling striding....
-    if (llvm::any_of(dilation, [](int64_t v) { return v != 1; }))
-      return failure();
 
     // If strides are all 1 we dont need to use this one.
     if (llvm::all_of(stride, [](int64_t v) { return v == 1; }))
-      return failure();
+      return rewriter.notifyMatchFailure(op, "non-one stride found.");
 
     if (!inputTy.hasStaticShape() || !weightTy.hasStaticShape() ||
         !biasTy.hasStaticShape() || !resultTy.hasStaticShape())
@@ -200,29 +135,28 @@ public:
     // Pad the weight so that it is modulo of the striding.
     llvm::SmallVector<int32_t, 8> weightPadding = {0, 0, 0, 0, 0, 0, 0, 0};
     weightPadding[3] =
-        weightHeight % stride[0] ? stride[0] - weightHeight % stride[0] : 0;
+        (weightHeight % stride[0]) ? (stride[0] - weightHeight % stride[0]) : 0;
     weightPadding[5] =
-        weightWidth % stride[1] ? stride[1] - weightWidth % stride[1] : 0;
+        (weightWidth % stride[1]) ? (stride[1] - weightWidth % stride[1]) : 0;
     DenseElementsAttr weightPaddingAttr = DenseIntElementsAttr::get(
         RankedTensorType::get({4, 2}, rewriter.getI32Type()), weightPadding);
-    Value weightPaddingVal = createOpAndInfer<tosa::ConstOp>(
+    Value weightPaddingVal = CreateOpAndInferShape<tosa::ConstOp>(
         rewriter, loc, weightPaddingAttr.getType(), weightPaddingAttr);
 
-    if (op.quantization_info().hasValue()) {
-      auto quantInfo = op.quantization_info().getValue();
-      weight = createOpAndInfer<tosa::PadOp>(
+    if (op.getQuantizationInfo().has_value()) {
+      auto quantInfo = op.getQuantizationInfo().value();
+      weight = CreateOpAndInferShape<tosa::PadOp>(
           rewriter, loc, UnrankedTensorType::get(weightETy), weight,
           weightPaddingVal, nullptr,
-          PadOpQuantizationAttr::get(quantInfo.weight_zp(),
-                                     rewriter.getContext()));
+          rewriter.getAttr<PadOpQuantizationAttr>(quantInfo.getWeightZp()));
 
     } else {
-      weight = createOpAndInfer<tosa::PadOp>(rewriter, loc,
-                                             UnrankedTensorType::get(weightETy),
-                                             weight, weightPaddingVal);
+      weight = CreateOpAndInferShape<tosa::PadOp>(
+          rewriter, loc, UnrankedTensorType::get(weightETy), weight,
+          weightPaddingVal);
     }
 
-    weightTy = weight.getType().cast<ShapedType>();
+    weightTy = cast<ShapedType>(weight.getType());
     weightHeight = weightTy.getDimSize(1);
     weightWidth = weightTy.getDimSize(2);
 
@@ -231,16 +165,16 @@ public:
         outputChannels, weightHeight / stride[0],
         stride[0],      weightWidth / stride[1],
         stride[1],      inputChannels};
-    weight = createOpAndInfer<tosa::ReshapeOp>(
+    weight = CreateOpAndInferShape<tosa::ReshapeOp>(
         rewriter, loc, UnrankedTensorType::get(weightETy), weight,
-        rewriter.getI64ArrayAttr(weightReshapeDims0));
+        rewriter.getDenseI64ArrayAttr(weightReshapeDims0));
 
     // Transpose the factored-out stride to the output channels.
     Value transposeWeightVal = rewriter.create<tosa::ConstOp>(
         loc, RankedTensorType::get({6}, rewriter.getI32Type()),
         rewriter.getI32TensorAttr({2, 4, 0, 1, 3, 5}));
 
-    weight = createOpAndInfer<tosa::TransposeOp>(
+    weight = CreateOpAndInferShape<tosa::TransposeOp>(
         rewriter, loc, UnrankedTensorType::get(weightETy), weight,
         transposeWeightVal);
 
@@ -248,17 +182,17 @@ public:
     llvm::SmallVector<int64_t, 6> weightReshapeDims1 = {
         outputChannels * stride[0] * stride[1], weightHeight / stride[0],
         weightWidth / stride[1], inputChannels};
-    weight = createOpAndInfer<tosa::ReshapeOp>(
+    weight = CreateOpAndInferShape<tosa::ReshapeOp>(
         rewriter, loc, UnrankedTensorType::get(weightETy), weight,
-        rewriter.getI64ArrayAttr(weightReshapeDims1));
-    ShapedType restridedWeightTy = weight.getType().cast<ShapedType>();
+        rewriter.getDenseI64ArrayAttr(weightReshapeDims1));
+    ShapedType restridedWeightTy = cast<ShapedType>(weight.getType());
 
-    weight = createOpAndInfer<tosa::ReverseOp>(
+    weight = CreateOpAndInferShape<tosa::ReverseOp>(
         rewriter, loc, UnrankedTensorType::get(weightETy), weight,
-        rewriter.getI64IntegerAttr(1));
-    weight = createOpAndInfer<tosa::ReverseOp>(
+        /* axis = */ rewriter.getI32IntegerAttr(1));
+    weight = CreateOpAndInferShape<tosa::ReverseOp>(
         rewriter, loc, UnrankedTensorType::get(weightETy), weight,
-        rewriter.getI64IntegerAttr(2));
+        /* axis = */ rewriter.getI32IntegerAttr(2));
 
     // We need to pad the input far enough that we can pull all values.
     llvm::SmallVector<int32_t, 8> inputPadding = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -270,20 +204,19 @@ public:
     DenseElementsAttr inputPaddingAttr = DenseIntElementsAttr::get(
         RankedTensorType::get({4, 2}, rewriter.getI32Type()), inputPadding);
 
-    Value inputPaddingVal = createOpAndInfer<tosa::ConstOp>(
+    Value inputPaddingVal = CreateOpAndInferShape<tosa::ConstOp>(
         rewriter, loc, inputPaddingAttr.getType(), inputPaddingAttr);
 
-    if (op.quantization_info().hasValue()) {
-      auto quantInfo = op.quantization_info().getValue();
-      input = createOpAndInfer<tosa::PadOp>(
+    if (op.getQuantizationInfo().has_value()) {
+      auto quantInfo = op.getQuantizationInfo().value();
+      input = CreateOpAndInferShape<tosa::PadOp>(
           rewriter, loc, UnrankedTensorType::get(inputETy), input,
           inputPaddingVal, nullptr,
-          PadOpQuantizationAttr::get(quantInfo.input_zp(),
-                                     rewriter.getContext()));
+          rewriter.getAttr<PadOpQuantizationAttr>(quantInfo.getInputZp()));
     } else {
-      input = createOpAndInfer<tosa::PadOp>(rewriter, loc,
-                                            UnrankedTensorType::get(inputETy),
-                                            input, inputPaddingVal);
+      input = CreateOpAndInferShape<tosa::PadOp>(
+          rewriter, loc, UnrankedTensorType::get(inputETy), input,
+          inputPaddingVal);
     }
 
     // We use a zero bias as we need to broadcast the bias.
@@ -298,27 +231,27 @@ public:
 
     // Perform the convolution using the zero bias.
     Value conv2d;
-    if (op.quantization_info().hasValue()) {
-      conv2d = createOpAndInfer<tosa::Conv2DOp>(
+    if (op.getQuantizationInfo()) {
+      conv2d = CreateOpAndInferShape<tosa::Conv2DOp>(
                    rewriter, loc, UnrankedTensorType::get(resultETy), input,
                    weight, zeroBias,
-                   /*pad=*/rewriter.getI64ArrayAttr({0, 0, 0, 0}),
-                   /*stride=*/rewriter.getI64ArrayAttr({1, 1}),
-                   /*dilation=*/rewriter.getI64ArrayAttr({1, 1}),
-                   op.quantization_info().getValue())
+                   /*pad=*/rewriter.getDenseI64ArrayAttr({0, 0, 0, 0}),
+                   /*stride=*/rewriter.getDenseI64ArrayAttr({1, 1}),
+                   /*dilation=*/rewriter.getDenseI64ArrayAttr({1, 1}),
+                   *op.getQuantizationInfo())
                    .getResult();
     } else {
-      conv2d = createOpAndInfer<tosa::Conv2DOp>(
+      conv2d = CreateOpAndInferShape<tosa::Conv2DOp>(
                    rewriter, loc, UnrankedTensorType::get(resultETy), input,
                    weight, zeroBias,
-                   /*pad=*/rewriter.getI64ArrayAttr({0, 0, 0, 0}),
-                   /*stride=*/rewriter.getI64ArrayAttr({1, 1}),
-                   /*dilation=*/rewriter.getI64ArrayAttr({1, 1}))
+                   /*pad=*/rewriter.getDenseI64ArrayAttr({0, 0, 0, 0}),
+                   /*stride=*/rewriter.getDenseI64ArrayAttr({1, 1}),
+                   /*dilation=*/rewriter.getDenseI64ArrayAttr({1, 1}))
                    .getResult();
     }
 
     // Factor the resulting width / height.
-    ShapedType convTy = conv2d.getType().cast<ShapedType>();
+    ShapedType convTy = cast<ShapedType>(conv2d.getType());
     Type convETy = convTy.getElementType();
 
     int64_t convHeight = convTy.getDimSize(1);
@@ -327,64 +260,82 @@ public:
     // Factor striding out of the convolution result.
     llvm::SmallVector<int64_t, 6> convReshapeDims0 = {
         batch, convHeight, convWidth, stride[0], stride[1], outputChannels};
-    conv2d = createOpAndInfer<tosa::ReshapeOp>(
+    conv2d = CreateOpAndInferShape<tosa::ReshapeOp>(
         rewriter, loc, UnrankedTensorType::get(resultETy), conv2d,
-        rewriter.getI64ArrayAttr(convReshapeDims0));
+        rewriter.getDenseI64ArrayAttr(convReshapeDims0));
 
     // Transpose the factored-out stride to the output channels.
     Value transposeConvVal = rewriter.create<tosa::ConstOp>(
         loc, RankedTensorType::get({6}, rewriter.getI32Type()),
         rewriter.getI32TensorAttr({0, 1, 3, 2, 4, 5}));
 
-    conv2d = createOpAndInfer<tosa::TransposeOp>(
+    conv2d = CreateOpAndInferShape<tosa::TransposeOp>(
         rewriter, loc, UnrankedTensorType::get(convETy), conv2d,
         transposeConvVal);
 
     // Fuse striding behavior back into width / height.
     llvm::SmallVector<int64_t, 6> convReshapeDims1 = {
         batch, convHeight * stride[0], convWidth * stride[1], outputChannels};
-    conv2d = createOpAndInfer<tosa::ReshapeOp>(
+    conv2d = CreateOpAndInferShape<tosa::ReshapeOp>(
         rewriter, loc, UnrankedTensorType::get(resultETy), conv2d,
-        rewriter.getI64ArrayAttr(convReshapeDims1));
+        rewriter.getDenseI64ArrayAttr(convReshapeDims1));
 
-    // Slice out the final result.
-    llvm::SmallVector<int64_t, 4> sliceBegin = {0, 0, 0, 0};
-    llvm::SmallVector<int64_t, 4> sliceSize(resultTy.getShape().begin(),
-                                            resultTy.getShape().begin());
-    sliceBegin[1] = pad[0];
-    sliceBegin[2] = pad[1];
+    // Determine the amount to slice / pad from the result start.
+    int64_t resultSliceTop = std::max<int64_t>(0, -pad[0]);
+    int64_t resultSliceLeft = std::max<int64_t>(0, -pad[2]);
+    int64_t resultPadTop = std::max<int64_t>(0, pad[0]);
+    int64_t resultPadLeft = std::max<int64_t>(0, pad[2]);
 
-    auto slice = createOpAndInfer<tosa::SliceOp>(
+    // Try to slice the targetted result size, cap to the convolutions width.
+    int64_t resultSliceHeight =
+        std::min<int64_t>(convReshapeDims1[1] - resultSliceTop,
+                          resultTy.getDimSize(1) - resultPadTop);
+    int64_t resultSliceWidth =
+        std::min<int64_t>(convReshapeDims1[2] - resultSliceLeft,
+                          resultTy.getDimSize(2) - resultPadLeft);
+
+    llvm::SmallVector<int64_t, 4> sliceBegin = {0, resultSliceTop,
+                                                resultSliceLeft, 0};
+    llvm::SmallVector<int64_t, 4> sliceSize(convReshapeDims1.begin(),
+                                            convReshapeDims1.end());
+    sliceSize[1] = resultSliceHeight;
+    sliceSize[2] = resultSliceWidth;
+
+    auto slice = CreateOpAndInferShape<tosa::SliceOp>(
                      rewriter, loc, UnrankedTensorType::get(resultETy), conv2d,
-                     rewriter.getI64ArrayAttr(sliceBegin),
-                     rewriter.getI64ArrayAttr(resultTy.getShape()))
+                     rewriter.getDenseI64ArrayAttr(sliceBegin),
+                     rewriter.getDenseI64ArrayAttr(sliceSize))
                      .getResult();
 
-    auto addBias =
-        createOpAndInfer<tosa::AddOp>(rewriter, loc, op.getType(), slice, bias);
+    llvm::SmallVector<int32_t, 8> resultPadding = {0, 0, 0, 0, 0, 0, 0, 0};
+    resultPadding[2] = resultPadTop;
+    resultPadding[3] = resultTy.getDimSize(1) - resultPadTop - sliceSize[1];
+    resultPadding[4] = resultPadLeft;
+    resultPadding[5] = resultTy.getDimSize(2) - resultPadLeft - sliceSize[2];
 
-    rewriter.replaceOp(op, addBias.getResult());
+    DenseElementsAttr resultPaddingAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({4, 2}, rewriter.getI32Type()), resultPadding);
 
+    Value resultPaddingVal = CreateOpAndInferShape<tosa::ConstOp>(
+        rewriter, loc, resultPaddingAttr.getType(), resultPaddingAttr);
+
+    Value resultPad = CreateOpAndInferShape<tosa::PadOp>(
+        rewriter, loc, UnrankedTensorType::get(resultETy), slice,
+        resultPaddingVal);
+
+    if (EqualizeRanks(rewriter, op.getLoc(), resultPad, bias).failed()) {
+      return failure();
+    }
+
+    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, op.getType(), resultPad, bias);
     return success();
   }
 };
 
-/// Pass that enables broadcast by making all input arrays have the same
-/// number of dimensions. Insert RESHAPE operations to lower rank operand
-struct TosaDecomposeTransposeConv
-    : public TosaDecomposeTransposeConvBase<TosaDecomposeTransposeConv> {
-public:
-  void runOnFunction() override {
-    auto func = getFunction();
-    RewritePatternSet patterns(func.getContext());
-    patterns
-        .insert<TransposeConvDilatedConverter, TransposeConvStridedConverter>(
-            func.getContext());
-    (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
-  }
-};
 } // namespace
 
-std::unique_ptr<Pass> mlir::tosa::createTosaDecomposeTransposeConvPass() {
-  return std::make_unique<TosaDecomposeTransposeConv>();
+void mlir::tosa::populateTosaDecomposeTransposeConv(
+    MLIRContext *ctx, RewritePatternSet &patterns) {
+  patterns.add<TransposeConvNonStridedConverter>(ctx);
+  patterns.add<TransposeConvStridedConverter>(ctx);
 }

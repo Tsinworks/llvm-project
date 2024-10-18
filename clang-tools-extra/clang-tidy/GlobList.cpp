@@ -7,28 +7,29 @@
 //===----------------------------------------------------------------------===//
 
 #include "GlobList.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 
-namespace clang {
-namespace tidy {
+namespace clang::tidy {
 
 // Returns true if GlobList starts with the negative indicator ('-'), removes it
 // from the GlobList.
 static bool consumeNegativeIndicator(StringRef &GlobList) {
   GlobList = GlobList.trim();
-  if (GlobList.startswith("-")) {
-    GlobList = GlobList.substr(1);
-    return true;
-  }
-  return false;
+  return GlobList.consume_front("-");
 }
 
-// Converts first glob from the comma-separated list of globs to Regex and
-// removes it and the trailing comma from the GlobList.
-static llvm::Regex consumeGlob(StringRef &GlobList) {
-  StringRef UntrimmedGlob = GlobList.substr(0, GlobList.find(','));
+// Extracts the first glob from the comma-separated list of globs,
+// removes it and the trailing comma from the GlobList and
+// returns the extracted glob.
+static llvm::StringRef extractNextGlob(StringRef &GlobList) {
+  StringRef UntrimmedGlob = GlobList.substr(0, GlobList.find_first_of(",\n"));
   StringRef Glob = UntrimmedGlob.trim();
   GlobList = GlobList.substr(UntrimmedGlob.size() + 1);
+  return Glob;
+}
+
+static llvm::Regex createRegexFromGlob(StringRef &Glob) {
   SmallString<128> RegexText("^");
   StringRef MetaChars("()^$|*+?.[]\\{}");
   for (char C : Glob) {
@@ -39,15 +40,16 @@ static llvm::Regex consumeGlob(StringRef &GlobList) {
     RegexText.push_back(C);
   }
   RegexText.push_back('$');
-  return llvm::Regex(RegexText);
+  return {RegexText.str()};
 }
 
 GlobList::GlobList(StringRef Globs, bool KeepNegativeGlobs /* =true */) {
-  Items.reserve(Globs.count(',') + 1);
+  Items.reserve(Globs.count(',') + Globs.count('\n') + 1);
   do {
     GlobListItem Item;
     Item.IsPositive = !consumeNegativeIndicator(Globs);
-    Item.Regex = consumeGlob(Globs);
+    Item.Text = extractNextGlob(Globs);
+    Item.Regex = createRegexFromGlob(Item.Text);
     if (Item.IsPositive || KeepNegativeGlobs)
       Items.push_back(std::move(Item));
   } while (!Globs.empty());
@@ -64,17 +66,12 @@ bool GlobList::contains(StringRef S) const {
 }
 
 bool CachedGlobList::contains(StringRef S) const {
-  switch (auto &Result = Cache[S]) {
-  case Yes:
-    return true;
-  case No:
-    return false;
-  case None:
-    Result = GlobList::contains(S) ? Yes : No;
-    return Result == Yes;
-  }
-  llvm_unreachable("invalid enum");
+  auto Entry = Cache.try_emplace(S);
+  bool &Value = Entry.first->getValue();
+  // If the entry was just inserted, determine its required value.
+  if (Entry.second)
+    Value = GlobList::contains(S);
+  return Value;
 }
 
-} // namespace tidy
-} // namespace clang
+} // namespace clang::tidy

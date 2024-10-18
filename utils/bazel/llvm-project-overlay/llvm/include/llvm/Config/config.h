@@ -24,7 +24,7 @@
 #include "llvm/Config/llvm-config.h"
 
 /* Bug report URL. */
-#define BUG_REPORT_URL "https://bugs.llvm.org/"
+#define BUG_REPORT_URL "https://github.com/llvm/llvm-project/issues/"
 
 /* Define to 1 to enable backtraces, and to 0 otherwise. */
 #define ENABLE_BACKTRACES 1
@@ -66,9 +66,6 @@
    don't. */
 #define HAVE_DECL_STRERROR_S 0
 
-/* Define to 1 if you have the DIA SDK installed, and to 0 if you don't. */
-#define LLVM_ENABLE_DIA_SDK 0
-
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #define HAVE_DLFCN_H 1
 
@@ -76,7 +73,7 @@
 #define HAVE_DLOPEN 1
 
 /* Define if dladdr() is available on this platform. */
-/* #undef HAVE_DLADDR */
+#define HAVE_DLADDR 1
 
 /* Define to 1 if we can register EH frames on this platform. */
 /* HAVE_REGISTER_FRAME defined in Bazel*/
@@ -144,12 +141,6 @@
 /* Define to 1 if you have the `pthread_setname_np' function. */
 #define HAVE_PTHREAD_SETNAME_NP 1
 
-/* Define to 1 if you have the <link.h> header file. */
-/* HAVE_LINK_H defined in Bazel */
-
-/* Define to 1 if you have the `lseek64' function. */
-/* HAVE_LSEEK64 defined in Bazel */
-
 /* Define to 1 if you have the <mach/mach.h> header file. */
 /* HAVE_MACH_MACH_H defined in Bazel */
 
@@ -170,9 +161,6 @@
 
 /* Define to 1 if you have the `pread' function. */
 #define HAVE_PREAD 1
-
-/* Have pthread_getspecific */
-#define HAVE_PTHREAD_GETSPECIFIC 1
 
 /* Define to 1 if you have the <pthread.h> header file. */
 /* HAVE_PTHREAD_H defined in Bazel */
@@ -198,9 +186,6 @@
 /* Define to 1 if you have the <signal.h> header file. */
 #define HAVE_SIGNAL_H 1
 
-/* Define to 1 if you have the `strerror' function. */
-#define HAVE_STRERROR 1
-
 /* Define to 1 if you have the `strerror_r' function. */
 /* HAVE_STRERROR_R defined in Bazel */
 
@@ -212,9 +197,6 @@
 
 /* Define to 1 if you have the <sys/mman.h> header file. */
 #define HAVE_SYS_MMAN_H 1
-
-/* Define to 1 if you have the <sys/param.h> header file. */
-#define HAVE_SYS_PARAM_H 1
 
 /* Define to 1 if you have the <sys/resource.h> header file. */
 #define HAVE_SYS_RESOURCE_H 1
@@ -230,12 +212,6 @@
 
 /* Define to 1 if stat struct has st_mtim member. */
 /* HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC defined in Bazel */
-
-/* Define to 1 if you have the <sys/types.h> header file. */
-#define HAVE_SYS_TYPES_H 1
-
-/* Define if the setupterm() function is supported this platform. */
-/* LLVM_ENABLE_TERMINFO defined in Bazel */
 
 /* Define to 1 if you have the <termios.h> header file. */
 #define HAVE_TERMIOS_H 1
@@ -309,21 +285,17 @@
 /* Linker version detected at compile time. */
 /* #undef HOST_LINK_VERSION */
 
-/* Target triple LLVM will generate code for by default */
-/* Doesn't use `cmakedefine` because it is allowed to be empty. */
-/* LLVM_DEFAULT_TARGET_TRIPLE defined in Bazel */
-
 /* Define if zlib compression is available */
 /* LLVM_ENABLE_ZLIB defined in Bazel */
 
 /* Define if overriding target triple is enabled */
 /* #undef LLVM_TARGET_TRIPLE_ENV */
 
-/* LLVM version information */
-/* #undef LLVM_VERSION_INFO */
-
 /* Whether tools show host and target info when invoked with --version */
 #define LLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO 1
+
+/* Whether tools show optional build config flags when invoked with --version */
+#define LLVM_VERSION_PRINTER_SHOW_BUILD_CONFIG 1
 
 /* Define if libxml2 is supported on this platform. */
 /* #undef LLVM_ENABLE_LIBXML2 */
@@ -332,7 +304,7 @@
 /* LTDL_SHLIB_EXT defined in Bazel */
 
 /* Define to the address where bug reports for this package should be sent. */
-#define PACKAGE_BUGREPORT "https://bugs.llvm.org/"
+#define PACKAGE_BUGREPORT "https://github.com/llvm/llvm-project/issues/"
 
 /* Define to the full name of this package. */
 #define PACKAGE_NAME "LLVM"
@@ -345,12 +317,6 @@
 
 /* Define to the vendor of this package. */
 /* #undef PACKAGE_VENDOR */
-
-/* Define as the return type of signal handlers (`int' or `void'). */
-#define RETSIGTYPE void
-
-/* Define if std::is_trivially_copyable is supported */
-#define HAVE_STD_IS_TRIVIALLY_COPYABLE 1
 
 /* Define to a function implementing stricmp */
 /* stricmp defined conditionally below. */

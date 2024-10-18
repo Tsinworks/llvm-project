@@ -24,7 +24,7 @@ SimpleExecutorMemoryManager::~SimpleExecutorMemoryManager() {
 Expected<ExecutorAddr> SimpleExecutorMemoryManager::allocate(uint64_t Size) {
   std::error_code EC;
   auto MB = sys::Memory::allocateMappedMemory(
-      Size, 0, sys::Memory::MF_READ | sys::Memory::MF_WRITE, EC);
+      Size, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, EC);
   if (EC)
     return errorCodeToError(EC);
   std::lock_guard<std::mutex> Lock(M);
@@ -35,7 +35,7 @@ Expected<ExecutorAddr> SimpleExecutorMemoryManager::allocate(uint64_t Size) {
 
 Error SimpleExecutorMemoryManager::finalize(tpctypes::FinalizeRequest &FR) {
   ExecutorAddr Base(~0ULL);
-  std::vector<tpctypes::WrapperFunctionCall> DeallocationActions;
+  std::vector<shared::WrapperFunctionCall> DeallocationActions;
   size_t SuccessfulFinalizationActions = 0;
 
   if (FR.Segments.empty()) {
@@ -52,8 +52,8 @@ Error SimpleExecutorMemoryManager::finalize(tpctypes::FinalizeRequest &FR) {
     Base = std::min(Base, Seg.Addr);
 
   for (auto &ActPair : FR.Actions)
-    if (ActPair.Deallocate.Func)
-      DeallocationActions.push_back(ActPair.Deallocate);
+    if (ActPair.Dealloc)
+      DeallocationActions.push_back(ActPair.Dealloc);
 
   // Get the Allocation for this finalization.
   size_t AllocSize = 0;
@@ -75,7 +75,7 @@ Error SimpleExecutorMemoryManager::finalize(tpctypes::FinalizeRequest &FR) {
   auto BailOut = [&](Error Err) {
     std::pair<void *, Allocation> AllocToDestroy;
 
-    // Get allocation to destory.
+    // Get allocation to destroy.
     {
       std::lock_guard<std::mutex> Lock(M);
       auto I = Allocations.find(Base.toPtr<void *>());
@@ -96,7 +96,7 @@ Error SimpleExecutorMemoryManager::finalize(tpctypes::FinalizeRequest &FR) {
     while (SuccessfulFinalizationActions)
       Err =
           joinErrors(std::move(Err), FR.Actions[--SuccessfulFinalizationActions]
-                                         .Deallocate.runWithSPSRet());
+                                         .Dealloc.runWithSPSRetErrorMerged());
 
     // Deallocate memory.
     sys::MemoryBlock MB(AllocToDestroy.first, AllocToDestroy.second.Size);
@@ -126,20 +126,21 @@ Error SimpleExecutorMemoryManager::finalize(tpctypes::FinalizeRequest &FR) {
           inconvertibleErrorCode()));
 
     char *Mem = Seg.Addr.toPtr<char *>();
-    memcpy(Mem, Seg.Content.data(), Seg.Content.size());
+    if (!Seg.Content.empty())
+      memcpy(Mem, Seg.Content.data(), Seg.Content.size());
     memset(Mem + Seg.Content.size(), 0, Seg.Size - Seg.Content.size());
     assert(Seg.Size <= std::numeric_limits<size_t>::max());
     if (auto EC = sys::Memory::protectMappedMemory(
             {Mem, static_cast<size_t>(Seg.Size)},
-            tpctypes::fromWireProtectionFlags(Seg.Prot)))
+            toSysMemoryProtectionFlags(Seg.RAG.Prot)))
       return BailOut(errorCodeToError(EC));
-    if (Seg.Prot & tpctypes::WPF_Exec)
+    if ((Seg.RAG.Prot & MemProt::Exec) == MemProt::Exec)
       sys::Memory::InvalidateInstructionCache(Mem, Seg.Size);
   }
 
   // Run finalization actions.
   for (auto &ActPair : FR.Actions) {
-    if (auto Err = ActPair.Finalize.runWithSPSRet())
+    if (auto Err = ActPair.Finalize.runWithSPSRetErrorMerged())
       return BailOut(std::move(Err));
     ++SuccessfulFinalizationActions;
   }
@@ -152,7 +153,7 @@ Error SimpleExecutorMemoryManager::deallocate(
   std::vector<std::pair<void *, Allocation>> AllocPairs;
   AllocPairs.reserve(Bases.size());
 
-  // Get allocation to destory.
+  // Get allocation to destroy.
   Error Err = Error::success();
   {
     std::lock_guard<std::mutex> Lock(M);
@@ -212,7 +213,7 @@ Error SimpleExecutorMemoryManager::deallocateImpl(void *Base, Allocation &A) {
 
   while (!A.DeallocationActions.empty()) {
     Err = joinErrors(std::move(Err),
-                     A.DeallocationActions.back().runWithSPSRet());
+                     A.DeallocationActions.back().runWithSPSRetErrorMerged());
     A.DeallocationActions.pop_back();
   }
 

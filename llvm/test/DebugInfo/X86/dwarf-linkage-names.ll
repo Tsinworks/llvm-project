@@ -17,10 +17,10 @@
 
 ; This assumes the variable will appear before the function.
 ; LINKAGE1: .section .debug_info
-; LINKAGE1: DW_TAG_subprogram
+; LINKAGE1: DW_TAG_variable
 ; LINKAGE1-NOT: DW_TAG
 ; LINKAGE1: {{DW_AT_(MIPS_)?linkage_name}}
-; LINKAGE1: DW_TAG_variable
+; LINKAGE1: DW_TAG_subprogram
 ; LINKAGE1-NOT: DW_TAG
 ; LINKAGE1: {{DW_AT_(MIPS_)?linkage_name}}
 ; LINKAGE1: .section
@@ -45,7 +45,7 @@ source_filename = "test/DebugInfo/X86/dwarf-linkage-names.ll"
 ; Function Attrs: nounwind uwtable
 define i32 @_ZN4test3barEv() #0 !dbg !11 {
 entry:
-  %0 = load i32, i32* @_ZN4test10global_varE, align 4, !dbg !14
+  %0 = load i32, ptr @_ZN4test10global_varE, align 4, !dbg !14
   ret i32 %0, !dbg !15
 }
 

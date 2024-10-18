@@ -50,7 +50,7 @@ public:
   bool WriteRegister(const lldb_private::RegisterInfo *reg_info,
                      const lldb_private::RegisterValue &value) override;
 
-  bool ReadAllRegisterValues(lldb::DataBufferSP &data_sp) override;
+  bool ReadAllRegisterValues(lldb::WritableDataBufferSP &data_sp) override;
 
   bool WriteAllRegisterValues(const lldb::DataBufferSP &data_sp) override;
 
@@ -84,7 +84,7 @@ private:
                     // past the top (end) of the stack
   };
 
-  // UnwindLLDB needs to pass around references to RegisterLocations
+  // UnwindLLDB needs to pass around references to ConcreteRegisterLocations
   friend class UnwindLLDB;
 
   // Returns true if we have an unwind loop -- the same stack frame unwinding
@@ -135,29 +135,28 @@ private:
   // preserved a register that this
   // function didn't modify/use.
   //
-  // The RegisterLocation type may be set to eRegisterNotAvailable -- this will
-  // happen for a volatile register
-  // being queried mid-stack.  Instead of floating frame 0's contents of that
-  // register up the stack (which may
-  // or may not be the value of that reg when the function was executing), we
-  // won't return any value.
+  // The ConcreteRegisterLocation type may be set to eRegisterNotAvailable --
+  // this will happen for a volatile register being queried mid-stack.  Instead
+  // of floating frame 0's contents of that register up the stack (which may or
+  // may not be the value of that reg when the function was executing), we won't
+  // return any value.
   //
   // If a non-volatile register (a "preserved" register) is requested mid-stack
   // and no frames "below" the requested
   // stack have saved the register anywhere, it is safe to assume that frame 0's
   // register values are still the same
   // as the requesting frame's.
-  lldb_private::UnwindLLDB::RegisterSearchResult
-  SavedLocationForRegister(uint32_t lldb_regnum,
-                           lldb_private::UnwindLLDB::RegisterLocation &regloc);
+  lldb_private::UnwindLLDB::RegisterSearchResult SavedLocationForRegister(
+      uint32_t lldb_regnum,
+      lldb_private::UnwindLLDB::ConcreteRegisterLocation &regloc);
 
   bool ReadRegisterValueFromRegisterLocation(
-      lldb_private::UnwindLLDB::RegisterLocation regloc,
+      lldb_private::UnwindLLDB::ConcreteRegisterLocation regloc,
       const lldb_private::RegisterInfo *reg_info,
       lldb_private::RegisterValue &value);
 
   bool WriteRegisterValueToRegisterLocation(
-      lldb_private::UnwindLLDB::RegisterLocation regloc,
+      lldb_private::UnwindLLDB::ConcreteRegisterLocation regloc,
       const lldb_private::RegisterInfo *reg_info,
       const lldb_private::RegisterValue &value);
 
@@ -203,8 +202,7 @@ private:
   void UnwindLogMsgVerbose(const char *fmt, ...)
       __attribute__((format(printf, 2, 3)));
 
-  bool IsUnwindPlanValidForCurrentPC(lldb::UnwindPlanSP unwind_plan_sp,
-                                     int &valid_pc_offset);
+  bool IsUnwindPlanValidForCurrentPC(lldb::UnwindPlanSP unwind_plan_sp);
 
   lldb::addr_t GetReturnAddressHint(int32_t plan_offset);
 
@@ -250,7 +248,7 @@ private:
 
   uint32_t m_frame_number; // What stack frame this RegisterContext is
 
-  std::map<uint32_t, lldb_private::UnwindLLDB::RegisterLocation>
+  std::map<uint32_t, lldb_private::UnwindLLDB::ConcreteRegisterLocation>
       m_registers; // where to find reg values for this frame
 
   lldb_private::UnwindLLDB &m_parent_unwind; // The UnwindLLDB that is creating

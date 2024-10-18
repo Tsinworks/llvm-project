@@ -9,10 +9,18 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticError.h"
 #include "clang/Basic/DiagnosticIDs.h"
+#include "clang/Basic/DiagnosticLex.h"
 #include "gtest/gtest.h"
+#include <optional>
 
 using namespace llvm;
 using namespace clang;
+
+void clang::DiagnosticsTestHelper(DiagnosticsEngine &diag) {
+  EXPECT_FALSE(diag.DiagStates.empty());
+  EXPECT_TRUE(diag.DiagStatesByLoc.empty());
+  EXPECT_TRUE(diag.DiagStateOnPushStack.empty());
+}
 
 namespace {
 
@@ -71,6 +79,46 @@ TEST(DiagnosticTest, fatalsAsError) {
     EXPECT_EQ(Diags.getNumWarnings(), FatalsAsError);
   }
 }
+
+TEST(DiagnosticTest, tooManyErrorsIsAlwaysFatal) {
+  DiagnosticsEngine Diags(new DiagnosticIDs(), new DiagnosticOptions,
+                          new IgnoringDiagConsumer());
+  Diags.setFatalsAsError(true);
+
+  // Report a fatal_too_many_errors diagnostic to ensure that still
+  // acts as a fatal error despite downgrading fatal errors to errors.
+  Diags.Report(diag::fatal_too_many_errors);
+  EXPECT_TRUE(Diags.hasFatalErrorOccurred());
+
+  // Ensure that the severity of that diagnostic is really "fatal".
+  EXPECT_EQ(Diags.getDiagnosticLevel(diag::fatal_too_many_errors, {}),
+            DiagnosticsEngine::Level::Fatal);
+}
+
+// Check that soft RESET works as intended
+TEST(DiagnosticTest, softReset) {
+  DiagnosticsEngine Diags(new DiagnosticIDs(), new DiagnosticOptions,
+                          new IgnoringDiagConsumer());
+
+  unsigned numWarnings = 0U, numErrors = 0U;
+
+  Diags.Reset(true);
+  // Check For ErrorOccurred and TrapNumErrorsOccurred
+  EXPECT_FALSE(Diags.hasErrorOccurred());
+  EXPECT_FALSE(Diags.hasFatalErrorOccurred());
+  EXPECT_FALSE(Diags.hasUncompilableErrorOccurred());
+  // Check for UnrecoverableErrorOccurred and TrapNumUnrecoverableErrorsOccurred
+  EXPECT_FALSE(Diags.hasUnrecoverableErrorOccurred());
+
+  EXPECT_EQ(Diags.getNumWarnings(), numWarnings);
+  EXPECT_EQ(Diags.getNumErrors(), numErrors);
+
+  // Check for private variables of DiagnosticsEngine differentiating soft reset
+  DiagnosticsTestHelper(Diags);
+
+  EXPECT_TRUE(Diags.isLastDiagnosticIgnored());
+}
+
 TEST(DiagnosticTest, diagnosticError) {
   DiagnosticsEngine Diags(new DiagnosticIDs(), new DiagnosticOptions,
                           new IgnoringDiagConsumer());
@@ -81,7 +129,7 @@ TEST(DiagnosticTest, diagnosticError) {
                             << "error");
   ASSERT_TRUE(!Value);
   llvm::Error Err = Value.takeError();
-  Optional<PartialDiagnosticAt> ErrDiag = DiagnosticError::take(Err);
+  std::optional<PartialDiagnosticAt> ErrDiag = DiagnosticError::take(Err);
   llvm::cantFail(std::move(Err));
   ASSERT_FALSE(!ErrDiag);
   EXPECT_EQ(ErrDiag->first, SourceLocation());
@@ -91,5 +139,27 @@ TEST(DiagnosticTest, diagnosticError) {
   ASSERT_FALSE(!Value);
   EXPECT_EQ(*Value, std::make_pair(20, 1));
   EXPECT_EQ(Value->first, 20);
+}
+
+TEST(DiagnosticTest, storedDiagEmptyWarning) {
+  DiagnosticsEngine Diags(new DiagnosticIDs(), new DiagnosticOptions);
+
+  class CaptureDiagnosticConsumer : public DiagnosticConsumer {
+  public:
+    SmallVector<StoredDiagnostic> StoredDiags;
+
+    void HandleDiagnostic(DiagnosticsEngine::Level level,
+                          const Diagnostic &Info) override {
+      StoredDiags.push_back(StoredDiagnostic(level, Info));
+    }
+  };
+
+  CaptureDiagnosticConsumer CaptureConsumer;
+  Diags.setClient(&CaptureConsumer, /*ShouldOwnClient=*/false);
+  Diags.Report(diag::pp_hash_warning) << "";
+  ASSERT_TRUE(CaptureConsumer.StoredDiags.size() == 1);
+
+  // Make sure an empty warning can round-trip with \c StoredDiagnostic.
+  Diags.Report(CaptureConsumer.StoredDiags.front());
 }
 }

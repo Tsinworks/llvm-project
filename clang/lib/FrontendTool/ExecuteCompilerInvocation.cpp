@@ -15,6 +15,7 @@
 #include "clang/CodeGen/CodeGenAction.h"
 #include "clang/Config/config.h"
 #include "clang/Driver/Options.h"
+#include "clang/ExtractAPI/FrontendActions.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -30,6 +31,11 @@
 #include "llvm/Support/BuryPointer.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/ErrorHandling.h"
+
+#if CLANG_ENABLE_CIR
+#include "clang/CIR/FrontendAction/CIRGenAction.h"
+#endif
+
 using namespace clang;
 using namespace llvm::opt;
 
@@ -40,6 +46,13 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
   using namespace clang::frontend;
   StringRef Action("unknown");
   (void)Action;
+
+  unsigned UseCIR = CI.getFrontendOpts().UseClangIRPipeline;
+  frontend::ActionKind Act = CI.getFrontendOpts().ProgramAction;
+  bool EmitsCIR = Act == EmitCIR;
+
+  if (!UseCIR && EmitsCIR)
+    llvm::report_fatal_error("-emit-cir and only valid when using -fclangir");
 
   switch (CI.getFrontendOpts().ProgramAction) {
   case ASTDeclList:            return std::make_unique<ASTDeclListAction>();
@@ -52,18 +65,28 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
   case DumpTokens:             return std::make_unique<DumpTokensAction>();
   case EmitAssembly:           return std::make_unique<EmitAssemblyAction>();
   case EmitBC:                 return std::make_unique<EmitBCAction>();
+  case EmitCIR:
+#if CLANG_ENABLE_CIR
+    return std::make_unique<::cir::EmitCIRAction>();
+#else
+    llvm_unreachable("CIR suppport not built into clang");
+#endif
   case EmitHTML:               return std::make_unique<HTMLPrintAction>();
   case EmitLLVM:               return std::make_unique<EmitLLVMAction>();
   case EmitLLVMOnly:           return std::make_unique<EmitLLVMOnlyAction>();
   case EmitCodeGenOnly:        return std::make_unique<EmitCodeGenOnlyAction>();
   case EmitObj:                return std::make_unique<EmitObjAction>();
+  case ExtractAPI:
+    return std::make_unique<ExtractAPIAction>();
   case FixIt:                  return std::make_unique<FixItAction>();
   case GenerateModule:
     return std::make_unique<GenerateModuleFromModuleMapAction>();
   case GenerateModuleInterface:
     return std::make_unique<GenerateModuleInterfaceAction>();
-  case GenerateHeaderModule:
-    return std::make_unique<GenerateHeaderModuleAction>();
+  case GenerateReducedModuleInterface:
+    return std::make_unique<GenerateReducedModuleInterfaceAction>();
+  case GenerateHeaderUnit:
+    return std::make_unique<GenerateHeaderUnitAction>();
   case GeneratePCH:            return std::make_unique<GeneratePCHAction>();
   case GenerateInterfaceStubs:
     return std::make_unique<GenerateInterfaceStubsAction>();
@@ -175,6 +198,18 @@ CreateFrontendAction(CompilerInstance &CI) {
   }
 #endif
 
+  // Wrap the base FE action in an extract api action to generate
+  // symbol graph as a biproduct of compilation (enabled with
+  // --emit-symbol-graph option)
+  if (FEOpts.EmitSymbolGraph) {
+    if (FEOpts.SymbolGraphOutputDir.empty()) {
+      CI.getDiagnostics().Report(diag::warn_missing_symbol_graph_dir);
+      CI.getFrontendOpts().SymbolGraphOutputDir = ".";
+    }
+    CI.getCodeGenOpts().ClearASTBeforeBackend = false;
+    Act = std::make_unique<WrappingExtractAPIAction>(std::move(Act));
+  }
+
   // If there are any AST files to merge, create a frontend action
   // adaptor to perform the merge.
   if (!FEOpts.ASTMergeFiles.empty())
@@ -190,8 +225,8 @@ bool ExecuteCompilerInvocation(CompilerInstance *Clang) {
     driver::getDriverOptTable().printHelp(
         llvm::outs(), "clang -cc1 [options] file...",
         "LLVM 'Clang' Compiler: http://clang.llvm.org",
-        /*Include=*/driver::options::CC1Option,
-        /*Exclude=*/0, /*ShowAllAliases=*/false);
+        /*ShowHidden=*/false, /*ShowAllAliases=*/false,
+        llvm::opt::Visibility(driver::options::CC1Option));
     return true;
   }
 
@@ -222,7 +257,7 @@ bool ExecuteCompilerInvocation(CompilerInstance *Clang) {
 #if CLANG_ENABLE_STATIC_ANALYZER
   // These should happen AFTER plugins have been loaded!
 
-  AnalyzerOptions &AnOpts = *Clang->getAnalyzerOpts();
+  AnalyzerOptions &AnOpts = Clang->getAnalyzerOpts();
 
   // Honor -analyzer-checker-help and -analyzer-checker-help-hidden.
   if (AnOpts.ShowCheckerHelp || AnOpts.ShowCheckerHelpAlpha ||

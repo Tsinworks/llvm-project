@@ -16,6 +16,9 @@ class MLIRContext;
 class Pass;
 class RewritePatternSet;
 
+#define GEN_PASS_DECL_CONVERTVECTORTOSCF
+#include "mlir/Conversion/Passes.h.inc"
+
 /// When lowering an N-d vector transfer op to an (N-1)-d vector transfer op,
 /// a temporary buffer is created through which individual (N-1)-d vector are
 /// staged. This pattern can be applied multiple time, until the transfer op
@@ -53,12 +56,6 @@ struct VectorTransferToSCFOptions {
     targetRank = r;
     return *this;
   }
-  ///
-  bool lowerPermutationMaps = false;
-  VectorTransferToSCFOptions &enableLowerPermutationMaps(bool l = true) {
-    lowerPermutationMaps = l;
-    return *this;
-  }
   /// Allows vector transfers that operated on tensors to be lowered (this is an
   /// uncommon alternative).
   bool lowerTensors = false;
@@ -72,9 +69,17 @@ struct VectorTransferToSCFOptions {
     unroll = u;
     return *this;
   }
+  /// Enable scalable vector specific lowerings (which introduce loops). These
+  /// work alongside fullUnroll (which unrolls until the first scalable
+  /// dimension).
+  bool lowerScalable = false;
+  VectorTransferToSCFOptions enableLowerScalable(bool enable = true) {
+    lowerScalable = enable;
+    return *this;
+  }
 };
 
-/// Collect a set of patterns to convert from the Vector dialect to SCF + std.
+/// Collect a set of patterns to convert from the Vector dialect to SCF + func.
 void populateVectorToSCFConversionPatterns(
     RewritePatternSet &patterns,
     const VectorTransferToSCFOptions &options = VectorTransferToSCFOptions());

@@ -53,10 +53,10 @@ using namespace llvm;
 STATISTIC(HexagonNumVectorLoopCarriedReuse,
           "Number of values that were reused from a previous iteration.");
 
-static cl::opt<int> HexagonVLCRIterationLim("hexagon-vlcr-iteration-lim",
-    cl::Hidden,
+static cl::opt<int> HexagonVLCRIterationLim(
+    "hexagon-vlcr-iteration-lim", cl::Hidden,
     cl::desc("Maximum distance of loop carried dependences that are handled"),
-    cl::init(2), cl::ZeroOrMore);
+    cl::init(2));
 
 namespace llvm {
 
@@ -552,7 +552,7 @@ void HexagonVectorLoopCarriedReuse::reuseValue() {
   }
   BasicBlock *BB = BEInst->getParent();
   IRBuilder<> IRB(BB);
-  IRB.SetInsertPoint(BB->getFirstNonPHI());
+  IRB.SetInsertPoint(BB, BB->getFirstNonPHIIt());
   Value *BEVal = BEInst;
   PHINode *NewPhi;
   for (int i = Iterations-1; i >=0 ; --i) {
@@ -659,8 +659,7 @@ void HexagonVectorLoopCarriedReuse::findLoopCarriedDeps() {
       delete D;
   }
   LLVM_DEBUG(dbgs() << "Found " << Dependences.size() << " dependences\n");
-  LLVM_DEBUG(for (size_t i = 0; i < Dependences.size();
-                  ++i) { dbgs() << *Dependences[i] << "\n"; });
+  LLVM_DEBUG(for (const DepChain *D : Dependences) dbgs() << *D << "\n";);
 }
 
 Pass *llvm::createHexagonVectorLoopCarriedReuseLegacyPass() {

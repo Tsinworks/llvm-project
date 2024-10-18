@@ -15,8 +15,11 @@ using namespace mlir::tblgen;
 // OpClass definitions
 //===----------------------------------------------------------------------===//
 
-OpClass::OpClass(StringRef name, StringRef extraClassDeclaration)
-    : Class(name.str()), extraClassDeclaration(extraClassDeclaration),
+OpClass::OpClass(StringRef name, std::string extraClassDeclaration,
+                 std::string extraClassDefinition)
+    : Class(name.str()),
+      extraClassDeclaration(std::move(extraClassDeclaration)),
+      extraClassDefinition(std::move(extraClassDefinition)),
       parent(addParent("::mlir::Op")) {
   parent.addTemplateParam(getClassName().str());
   declare<VisibilityDeclaration>(Visibility::Public);
@@ -25,10 +28,15 @@ OpClass::OpClass(StringRef name, StringRef extraClassDeclaration)
   declare<UsingDeclaration>("Op::print");
   /// Type alias for the adaptor class.
   declare<UsingDeclaration>("Adaptor", className + "Adaptor");
+  declare<UsingDeclaration>("GenericAdaptor",
+                            className + "GenericAdaptor<RangeT>")
+      ->addTemplateParam("RangeT");
+  declare<UsingDeclaration>(
+      "FoldAdaptor", "GenericAdaptor<::llvm::ArrayRef<::mlir::Attribute>>");
 }
 
 void OpClass::finalize() {
   Class::finalize();
   declare<VisibilityDeclaration>(Visibility::Public);
-  declare<ExtraClassDeclaration>(extraClassDeclaration);
+  declare<ExtraClassDeclaration>(extraClassDeclaration, extraClassDefinition);
 }

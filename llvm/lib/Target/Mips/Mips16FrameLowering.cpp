@@ -30,7 +30,6 @@
 #include "llvm/MC/MachineLocation.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
-#include <cassert>
 #include <cstdint>
 #include <vector>
 
@@ -55,8 +54,7 @@ void Mips16FrameLowering::emitPrologue(MachineFunction &MF,
   // No need to allocate space on the stack.
   if (StackSize == 0 && !MFI.adjustsStack()) return;
 
-  MachineModuleInfo &MMI = MF.getMMI();
-  const MCRegisterInfo *MRI = MMI.getContext().getRegisterInfo();
+  const MCRegisterInfo *MRI = MF.getContext().getRegisterInfo();
 
   // Adjust stack.
   TII.makeFrame(Mips::SP, StackSize, MBB, MBBI);
@@ -74,7 +72,7 @@ void Mips16FrameLowering::emitPrologue(MachineFunction &MF,
 
     for (const CalleeSavedInfo &I : CSI) {
       int64_t Offset = MFI.getObjectOffset(I.getFrameIdx());
-      unsigned Reg = I.getReg();
+      Register Reg = I.getReg();
       unsigned DReg = MRI->getDwarfRegNum(Reg, true);
       unsigned CFIIndex = MF.addFrameInst(
           MCCFIInstruction::createOffset(nullptr, DReg, Offset));
@@ -124,7 +122,7 @@ bool Mips16FrameLowering::spillCalleeSavedRegisters(
     // method MipsTargetLowering::lowerRETURNADDR.
     // It's killed at the spill, unless the register is RA and return address
     // is taken.
-    unsigned Reg = I.getReg();
+    Register Reg = I.getReg();
     bool IsRAAndRetAddrIsTaken = (Reg == Mips::RA)
       && MF->getFrameInfo().isReturnAddressTaken();
     if (!IsRAAndRetAddrIsTaken)

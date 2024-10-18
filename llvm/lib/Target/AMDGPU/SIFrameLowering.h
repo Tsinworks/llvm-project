@@ -10,13 +10,9 @@
 #define LLVM_LIB_TARGET_AMDGPU_SIFRAMELOWERING_H
 
 #include "AMDGPUFrameLowering.h"
+#include "SIRegisterInfo.h"
 
 namespace llvm {
-
-class SIInstrInfo;
-class SIMachineFunctionInfo;
-class SIRegisterInfo;
-class GCNSubtarget;
 
 class SIFrameLowering final : public AMDGPUFrameLowering {
 public:
@@ -38,6 +34,16 @@ public:
                             RegScavenger *RS = nullptr) const override;
   void determineCalleeSavesSGPR(MachineFunction &MF, BitVector &SavedRegs,
                                 RegScavenger *RS = nullptr) const;
+  void determinePrologEpilogSGPRSaves(MachineFunction &MF, BitVector &SavedRegs,
+                                      bool NeedExecCopyReservedReg) const;
+  void emitCSRSpillStores(MachineFunction &MF, MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MBBI, DebugLoc &DL,
+                          LiveRegUnits &LiveUnits, Register FrameReg,
+                          Register FramePtrRegScratchCopy) const;
+  void emitCSRSpillRestores(MachineFunction &MF, MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI, DebugLoc &DL,
+                            LiveRegUnits &LiveUnits, Register FrameReg,
+                            Register FramePtrRegScratchCopy) const;
   bool
   assignCalleeSavedSpillSlots(MachineFunction &MF,
                               const TargetRegisterInfo *TRI,
@@ -52,10 +58,16 @@ public:
     MachineFunction &MF,
     RegScavenger *RS = nullptr) const override;
 
+  void processFunctionBeforeFrameIndicesReplaced(
+      MachineFunction &MF, RegScavenger *RS = nullptr) const override;
+
   MachineBasicBlock::iterator
   eliminateCallFramePseudoInstr(MachineFunction &MF,
                                 MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator MI) const override;
+
+protected:
+  bool hasFPImpl(const MachineFunction &MF) const override;
 
 private:
   void emitEntryFunctionFlatScratchInit(MachineFunction &MF,
@@ -73,8 +85,6 @@ private:
       Register ScratchWaveOffsetReg) const;
 
 public:
-  bool hasFP(const MachineFunction &MF) const override;
-
   bool requiresStackPointerReference(const MachineFunction &MF) const;
 };
 

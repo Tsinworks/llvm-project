@@ -84,10 +84,10 @@ static_assert(((sizeof g_fpr_regnums_arm64 / sizeof g_fpr_regnums_arm64[0]) -
               "g_fpu_regnums_arm64 has wrong number of register infos");
 
 static const RegisterSet g_reg_sets_arm64[] = {
-    {"General Purpose Registers", "gpr",
-     llvm::array_lengthof(g_gpr_regnums_arm64) - 1, g_gpr_regnums_arm64},
-    {"Floating Point Registers", "fpr",
-     llvm::array_lengthof(g_fpr_regnums_arm64) - 1, g_fpr_regnums_arm64},
+    {"General Purpose Registers", "gpr", std::size(g_gpr_regnums_arm64) - 1,
+     g_gpr_regnums_arm64},
+    {"Floating Point Registers", "fpr", std::size(g_fpr_regnums_arm64) - 1,
+     g_fpr_regnums_arm64},
 };
 
 enum { k_num_register_sets = 2 };
@@ -105,13 +105,13 @@ CreateRegisterInfoInterface(const ArchSpec &target_arch) {
 static Status GetThreadContextHelper(lldb::thread_t thread_handle,
                                      PCONTEXT context_ptr,
                                      const DWORD control_flag) {
-  Log *log = ProcessWindowsLog::GetLogIfAny(WINDOWS_LOG_REGISTERS);
+  Log *log = GetLog(WindowsLog::Registers);
   Status error;
 
   memset(context_ptr, 0, sizeof(::CONTEXT));
   context_ptr->ContextFlags = control_flag;
   if (!::GetThreadContext(thread_handle, context_ptr)) {
-    error.SetError(GetLastError(), eErrorTypeWin32);
+    error = Status(GetLastError(), eErrorTypeWin32);
     LLDB_LOG(log, "{0} GetThreadContext failed with error {1}", __FUNCTION__,
              error);
     return error;
@@ -121,11 +121,11 @@ static Status GetThreadContextHelper(lldb::thread_t thread_handle,
 
 static Status SetThreadContextHelper(lldb::thread_t thread_handle,
                                      PCONTEXT context_ptr) {
-  Log *log = ProcessWindowsLog::GetLogIfAny(WINDOWS_LOG_REGISTERS);
+  Log *log = GetLog(WindowsLog::Registers);
   Status error;
   // It's assumed that the thread has stopped.
   if (!::SetThreadContext(thread_handle, context_ptr)) {
-    error.SetError(GetLastError(), eErrorTypeWin32);
+    error = Status(GetLastError(), eErrorTypeWin32);
     LLDB_LOG(log, "{0} SetThreadContext failed with error {1}", __FUNCTION__,
              error);
     return error;
@@ -618,7 +618,7 @@ NativeRegisterContextWindows_arm64::ReadRegister(const RegisterInfo *reg_info,
                                                  RegisterValue &reg_value) {
   Status error;
   if (!reg_info) {
-    error.SetErrorString("reg_info NULL");
+    error = Status::FromErrorString("reg_info NULL");
     return error;
   }
 
@@ -626,9 +626,10 @@ NativeRegisterContextWindows_arm64::ReadRegister(const RegisterInfo *reg_info,
   if (reg == LLDB_INVALID_REGNUM) {
     // This is likely an internal register for lldb use only and should not be
     // directly queried.
-    error.SetErrorStringWithFormat("register \"%s\" is an internal-only lldb "
-                                   "register, cannot read directly",
-                                   reg_info->name);
+    error = Status::FromErrorStringWithFormat(
+        "register \"%s\" is an internal-only lldb "
+        "register, cannot read directly",
+        reg_info->name);
     return error;
   }
 
@@ -638,7 +639,7 @@ NativeRegisterContextWindows_arm64::ReadRegister(const RegisterInfo *reg_info,
   if (IsFPR(reg))
     return FPRRead(reg, reg_value);
 
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 Status NativeRegisterContextWindows_arm64::WriteRegister(
@@ -646,7 +647,7 @@ Status NativeRegisterContextWindows_arm64::WriteRegister(
   Status error;
 
   if (!reg_info) {
-    error.SetErrorString("reg_info NULL");
+    error = Status::FromErrorString("reg_info NULL");
     return error;
   }
 
@@ -654,9 +655,10 @@ Status NativeRegisterContextWindows_arm64::WriteRegister(
   if (reg == LLDB_INVALID_REGNUM) {
     // This is likely an internal register for lldb use only and should not be
     // directly written.
-    error.SetErrorStringWithFormat("register \"%s\" is an internal-only lldb "
-                                   "register, cannot write directly",
-                                   reg_info->name);
+    error = Status::FromErrorStringWithFormat(
+        "register \"%s\" is an internal-only lldb "
+        "register, cannot write directly",
+        reg_info->name);
     return error;
   }
 
@@ -666,11 +668,11 @@ Status NativeRegisterContextWindows_arm64::WriteRegister(
   if (IsFPR(reg))
     return FPRWrite(reg, reg_value);
 
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 Status NativeRegisterContextWindows_arm64::ReadAllRegisterValues(
-    lldb::DataBufferSP &data_sp) {
+    lldb::WritableDataBufferSP &data_sp) {
   const size_t data_size = REG_CONTEXT_SIZE;
   data_sp = std::make_shared<DataBufferHeap>(data_size, 0);
   ::CONTEXT tls_context;
@@ -689,14 +691,14 @@ Status NativeRegisterContextWindows_arm64::WriteAllRegisterValues(
   Status error;
   const size_t data_size = REG_CONTEXT_SIZE;
   if (!data_sp) {
-    error.SetErrorStringWithFormat(
+    error = Status::FromErrorStringWithFormat(
         "NativeRegisterContextWindows_arm64::%s invalid data_sp provided",
         __FUNCTION__);
     return error;
   }
 
   if (data_sp->GetByteSize() != data_size) {
-    error.SetErrorStringWithFormatv(
+    error = Status::FromErrorStringWithFormatv(
         "data_sp contained mismatched data size, expected {0}, actual {1}",
         data_size, data_sp->GetByteSize());
     return error;
@@ -709,22 +711,22 @@ Status NativeRegisterContextWindows_arm64::WriteAllRegisterValues(
 
 Status NativeRegisterContextWindows_arm64::IsWatchpointHit(uint32_t wp_index,
                                                            bool &is_hit) {
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 Status NativeRegisterContextWindows_arm64::GetWatchpointHitIndex(
     uint32_t &wp_index, lldb::addr_t trap_addr) {
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 Status NativeRegisterContextWindows_arm64::IsWatchpointVacant(uint32_t wp_index,
                                                               bool &is_vacant) {
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 Status NativeRegisterContextWindows_arm64::SetHardwareWatchpointWithIndex(
     lldb::addr_t addr, size_t size, uint32_t watch_flags, uint32_t wp_index) {
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 bool NativeRegisterContextWindows_arm64::ClearHardwareWatchpoint(
@@ -733,7 +735,7 @@ bool NativeRegisterContextWindows_arm64::ClearHardwareWatchpoint(
 }
 
 Status NativeRegisterContextWindows_arm64::ClearAllHardwareWatchpoints() {
-  return Status("unimplemented");
+  return Status::FromErrorString("unimplemented");
 }
 
 uint32_t NativeRegisterContextWindows_arm64::SetHardwareWatchpoint(

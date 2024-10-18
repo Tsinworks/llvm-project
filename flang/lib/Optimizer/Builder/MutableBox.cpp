@@ -11,12 +11,74 @@
 //===----------------------------------------------------------------------===//
 
 #include "flang/Optimizer/Builder/MutableBox.h"
-#include "flang/Lower/Todo.h"
 #include "flang/Optimizer/Builder/Character.h"
 #include "flang/Optimizer/Builder/FIRBuilder.h"
+#include "flang/Optimizer/Builder/Runtime/Derived.h"
+#include "flang/Optimizer/Builder/Runtime/Stop.h"
+#include "flang/Optimizer/Builder/Todo.h"
+#include "flang/Optimizer/Dialect/FIRAttr.h"
 #include "flang/Optimizer/Dialect/FIROps.h"
 #include "flang/Optimizer/Dialect/FIROpsSupport.h"
 #include "flang/Optimizer/Support/FatalError.h"
+
+/// Create a fir.box describing the new address, bounds, and length parameters
+/// for a MutableBox \p box.
+static mlir::Value
+createNewFirBox(fir::FirOpBuilder &builder, mlir::Location loc,
+                const fir::MutableBoxValue &box, mlir::Value addr,
+                mlir::ValueRange lbounds, mlir::ValueRange extents,
+                mlir::ValueRange lengths, mlir::Value tdesc = {}) {
+  if (mlir::isa<fir::BaseBoxType>(addr.getType()))
+    // The entity is already boxed.
+    return builder.createConvert(loc, box.getBoxTy(), addr);
+
+  mlir::Value shape;
+  if (!extents.empty()) {
+    if (lbounds.empty()) {
+      shape = builder.create<fir::ShapeOp>(loc, extents);
+    } else {
+      llvm::SmallVector<mlir::Value> shapeShiftBounds;
+      for (auto [lb, extent] : llvm::zip(lbounds, extents)) {
+        shapeShiftBounds.emplace_back(lb);
+        shapeShiftBounds.emplace_back(extent);
+      }
+      auto shapeShiftType =
+          fir::ShapeShiftType::get(builder.getContext(), extents.size());
+      shape = builder.create<fir::ShapeShiftOp>(loc, shapeShiftType,
+                                                shapeShiftBounds);
+    }
+  } // Otherwise, this a scalar. Leave the shape empty.
+
+  // Ignore lengths if already constant in the box type (this would trigger an
+  // error in the embox).
+  llvm::SmallVector<mlir::Value> cleanedLengths;
+  auto cleanedAddr = addr;
+  if (auto charTy = mlir::dyn_cast<fir::CharacterType>(box.getEleTy())) {
+    // Cast address to box type so that both input and output type have
+    // unknown or constant lengths.
+    auto bt = box.getBaseTy();
+    auto addrTy = addr.getType();
+    auto type = mlir::isa<fir::HeapType>(addrTy) ? fir::HeapType::get(bt)
+                : mlir::isa<fir::PointerType>(addrTy)
+                    ? fir::PointerType::get(bt)
+                    : builder.getRefType(bt);
+    cleanedAddr = builder.createConvert(loc, type, addr);
+    if (charTy.getLen() == fir::CharacterType::unknownLen())
+      cleanedLengths.append(lengths.begin(), lengths.end());
+  } else if (fir::isUnlimitedPolymorphicType(box.getBoxTy())) {
+    if (auto charTy = mlir::dyn_cast<fir::CharacterType>(
+            fir::dyn_cast_ptrEleTy(addr.getType()))) {
+      if (charTy.getLen() == fir::CharacterType::unknownLen())
+        cleanedLengths.append(lengths.begin(), lengths.end());
+    }
+  } else if (box.isDerivedWithLenParameters()) {
+    TODO(loc, "updating mutablebox of derived type with length parameters");
+    cleanedLengths = lengths;
+  }
+  mlir::Value emptySlice;
+  return builder.create<fir::EmboxOp>(loc, box.getBoxTy(), cleanedAddr, shape,
+                                      emptySlice, cleanedLengths, tdesc);
+}
 
 //===----------------------------------------------------------------------===//
 // MutableBoxValue writer and reader
@@ -47,8 +109,10 @@ public:
   /// Get base address of allocated/associated entity.
   mlir::Value readBaseAddress() {
     if (irBox) {
-      auto heapOrPtrTy = box.getBoxTy().getEleTy();
-      return builder.create<fir::BoxAddrOp>(loc, heapOrPtrTy, irBox);
+      auto memrefTy = box.getBoxTy().getEleTy();
+      if (!fir::isa_ref_type(memrefTy))
+        memrefTy = builder.getRefType(memrefTy);
+      return builder.create<fir::BoxAddrOp>(loc, memrefTy, irBox);
     }
     auto addrVar = box.getMutableProperties().addr;
     return builder.create<fir::LoadOp>(loc, addrVar);
@@ -87,7 +151,7 @@ public:
   /// also read into it.
   llvm::SmallVector<mlir::Value>
   readShape(llvm::SmallVectorImpl<mlir::Value> *lbounds = nullptr) {
-    llvm::SmallVector<mlir::Value> extents(box.rank());
+    llvm::SmallVector<mlir::Value> extents;
     auto rank = box.rank();
     for (decltype(rank) dim = 0; dim < rank; ++dim) {
       auto [lb, extent] = readShape(dim);
@@ -105,7 +169,7 @@ public:
     extents = readShape(&lbounds);
     if (box.isCharacter())
       lengths.emplace_back(readCharacterLength());
-    else if (box.isDerivedWithLengthParameters())
+    else if (box.isDerivedWithLenParameters())
       TODO(loc, "read allocatable or pointer derived type LEN parameters");
     return readBaseAddress();
   }
@@ -134,19 +198,22 @@ private:
 class MutablePropertyWriter {
 public:
   MutablePropertyWriter(fir::FirOpBuilder &builder, mlir::Location loc,
-                        const fir::MutableBoxValue &box)
-      : builder{builder}, loc{loc}, box{box} {}
+                        const fir::MutableBoxValue &box,
+                        mlir::Value typeSourceBox = {}, unsigned allocator = 0)
+      : builder{builder}, loc{loc}, box{box}, typeSourceBox{typeSourceBox},
+        allocator{allocator} {}
   /// Update MutableBoxValue with new address, shape and length parameters.
   /// Extents and lbounds must all have index type.
   /// lbounds can be empty in which case all ones is assumed.
   /// Length parameters must be provided for the length parameters that are
   /// deferred.
   void updateMutableBox(mlir::Value addr, mlir::ValueRange lbounds,
-                        mlir::ValueRange extents, mlir::ValueRange lengths) {
+                        mlir::ValueRange extents, mlir::ValueRange lengths,
+                        mlir::Value tdesc = {}) {
     if (box.isDescribedByVariables())
       updateMutableProperties(addr, lbounds, extents, lengths);
     else
-      updateIRBox(addr, lbounds, extents, lengths);
+      updateIRBox(addr, lbounds, extents, lengths, tdesc);
   }
 
   /// Update MutableBoxValue with a new fir.box. This requires that the mutable
@@ -175,7 +242,8 @@ public:
       // this is just like NULLIFY and the dynamic type must be set to the
       // declared type, not retain the previous dynamic type.
       auto deallocatedBox = fir::factory::createUnallocatedBox(
-          builder, loc, box.getBoxTy(), box.nonDeferredLenParams());
+          builder, loc, box.getBoxTy(), box.nonDeferredLenParams(),
+          typeSourceBox, allocator);
       builder.create<fir::StoreOp>(loc, deallocatedBox, box.getAddr());
     }
   }
@@ -208,53 +276,11 @@ public:
 private:
   /// Update the IR box (fir.ref<fir.box<T>>) of the MutableBoxValue.
   void updateIRBox(mlir::Value addr, mlir::ValueRange lbounds,
-                   mlir::ValueRange extents, mlir::ValueRange lengths) {
-    mlir::Value shape;
-    if (!extents.empty()) {
-      if (lbounds.empty()) {
-        auto shapeType =
-            fir::ShapeType::get(builder.getContext(), extents.size());
-        shape = builder.create<fir::ShapeOp>(loc, shapeType, extents);
-      } else {
-        llvm::SmallVector<mlir::Value> shapeShiftBounds;
-        for (auto [lb, extent] : llvm::zip(lbounds, extents)) {
-          shapeShiftBounds.emplace_back(lb);
-          shapeShiftBounds.emplace_back(extent);
-        }
-        auto shapeShiftType =
-            fir::ShapeShiftType::get(builder.getContext(), extents.size());
-        shape = builder.create<fir::ShapeShiftOp>(loc, shapeShiftType,
-                                                  shapeShiftBounds);
-      }
-    }
-    mlir::Value emptySlice;
-    // Ignore lengths if already constant in the box type (this would trigger an
-    // error in the embox).
-    llvm::SmallVector<mlir::Value> cleanedLengths;
-    mlir::Value irBox;
-    if (addr.getType().isa<fir::BoxType>()) {
-      // The entity is already boxed.
-      irBox = builder.createConvert(loc, box.getBoxTy(), addr);
-    } else {
-      auto cleanedAddr = addr;
-      if (auto charTy = box.getEleTy().dyn_cast<fir::CharacterType>()) {
-        // Cast address to box type so that both input and output type have
-        // unknown or constant lengths.
-        auto bt = box.getBaseTy();
-        auto addrTy = addr.getType();
-        auto type = addrTy.isa<fir::HeapType>()      ? fir::HeapType::get(bt)
-                    : addrTy.isa<fir::PointerType>() ? fir::PointerType::get(bt)
-                                                     : builder.getRefType(bt);
-        cleanedAddr = builder.createConvert(loc, type, addr);
-        if (charTy.getLen() == fir::CharacterType::unknownLen())
-          cleanedLengths.append(lengths.begin(), lengths.end());
-      } else if (box.isDerivedWithLengthParameters()) {
-        TODO(loc, "updating mutablebox of derived type with length parameters");
-        cleanedLengths = lengths;
-      }
-      irBox = builder.create<fir::EmboxOp>(loc, box.getBoxTy(), cleanedAddr,
-                                           shape, emptySlice, cleanedLengths);
-    }
+                   mlir::ValueRange extents, mlir::ValueRange lengths,
+                   mlir::Value tdesc = {},
+                   unsigned allocator = kDefaultAllocator) {
+    mlir::Value irBox = createNewFirBox(builder, loc, box, addr, lbounds,
+                                        extents, lengths, tdesc);
     builder.create<fir::StoreOp>(loc, irBox, box.getAddr());
   }
 
@@ -291,41 +317,54 @@ private:
       for (auto [len, lenVar] :
            llvm::zip(lengths, mutableProperties.deferredParams))
         castAndStore(len, lenVar);
-    else if (box.isDerivedWithLengthParameters())
+    else if (box.isDerivedWithLenParameters())
       TODO(loc, "update allocatable derived type length parameters");
   }
   fir::FirOpBuilder &builder;
   mlir::Location loc;
   fir::MutableBoxValue box;
+  mlir::Value typeSourceBox;
+  unsigned allocator;
 };
 
 } // namespace
 
-mlir::Value
-fir::factory::createUnallocatedBox(fir::FirOpBuilder &builder,
-                                   mlir::Location loc, mlir::Type boxType,
-                                   mlir::ValueRange nonDeferredParams) {
-  auto heapType = boxType.dyn_cast<fir::BoxType>().getEleTy();
-  auto type = fir::dyn_cast_ptrEleTy(heapType);
-  auto eleTy = type;
-  if (auto seqType = eleTy.dyn_cast<fir::SequenceType>())
-    eleTy = seqType.getEleTy();
-  if (auto recTy = eleTy.dyn_cast<fir::RecordType>())
+mlir::Value fir::factory::createUnallocatedBox(
+    fir::FirOpBuilder &builder, mlir::Location loc, mlir::Type boxType,
+    mlir::ValueRange nonDeferredParams, mlir::Value typeSourceBox,
+    unsigned allocator) {
+  auto baseBoxType = mlir::cast<fir::BaseBoxType>(boxType);
+  // Giving unallocated/disassociated status to assumed-rank POINTER/
+  // ALLOCATABLE is not directly possible to a Fortran user. But the
+  // compiler may need to create such temporary descriptor to deal with
+  // cases like ENTRY or host association. In such case, all that mater
+  // is that the base address is set to zero and the rank is set to
+  // some defined value. Hence, a scalar descriptor is created and
+  // cast to assumed-rank.
+  const bool isAssumedRank = baseBoxType.isAssumedRank();
+  if (isAssumedRank)
+    baseBoxType = baseBoxType.getBoxTypeWithNewShape(/*rank=*/0);
+  auto baseAddrType = baseBoxType.getEleTy();
+  if (!fir::isa_ref_type(baseAddrType))
+    baseAddrType = builder.getRefType(baseAddrType);
+  auto type = fir::unwrapRefType(baseAddrType);
+  auto eleTy = fir::unwrapSequenceType(type);
+  if (auto recTy = mlir::dyn_cast<fir::RecordType>(eleTy))
     if (recTy.getNumLenParams() > 0)
       TODO(loc, "creating unallocated fir.box of derived type with length "
                 "parameters");
-  auto nullAddr = builder.createNullConstant(loc, heapType);
+  auto nullAddr = builder.createNullConstant(loc, baseAddrType);
   mlir::Value shape;
-  if (auto seqTy = type.dyn_cast<fir::SequenceType>()) {
+  if (auto seqTy = mlir::dyn_cast<fir::SequenceType>(type)) {
     auto zero = builder.createIntegerConstant(loc, builder.getIndexType(), 0);
     llvm::SmallVector<mlir::Value> extents(seqTy.getDimension(), zero);
     shape = builder.createShape(
-        loc, fir::ArrayBoxValue{nullAddr, extents, /*lbounds=*/llvm::None});
+        loc, fir::ArrayBoxValue{nullAddr, extents, /*lbounds=*/std::nullopt});
   }
   // Provide dummy length parameters if they are dynamic. If a length parameter
   // is deferred. It is set to zero here and will be set on allocation.
   llvm::SmallVector<mlir::Value> lenParams;
-  if (auto charTy = eleTy.dyn_cast<fir::CharacterType>()) {
+  if (auto charTy = mlir::dyn_cast<fir::CharacterType>(eleTy)) {
     if (charTy.getLen() == fir::CharacterType::unknownLen()) {
       if (!nonDeferredParams.empty()) {
         lenParams.push_back(nonDeferredParams[0]);
@@ -337,20 +376,29 @@ fir::factory::createUnallocatedBox(fir::FirOpBuilder &builder,
     }
   }
   mlir::Value emptySlice;
-  return builder.create<fir::EmboxOp>(loc, boxType, nullAddr, shape, emptySlice,
-                                      lenParams);
+  auto embox = builder.create<fir::EmboxOp>(
+      loc, baseBoxType, nullAddr, shape, emptySlice, lenParams, typeSourceBox);
+  if (allocator != 0)
+    embox.setAllocatorIdx(allocator);
+  if (isAssumedRank)
+    return builder.createConvert(loc, boxType, embox);
+  return embox;
 }
 
-fir::MutableBoxValue
-fir::factory::createTempMutableBox(fir::FirOpBuilder &builder,
-                                   mlir::Location loc, mlir::Type type,
-                                   llvm::StringRef name) {
-  auto boxType = fir::BoxType::get(fir::HeapType::get(type));
+fir::MutableBoxValue fir::factory::createTempMutableBox(
+    fir::FirOpBuilder &builder, mlir::Location loc, mlir::Type type,
+    llvm::StringRef name, mlir::Value typeSourceBox, bool isPolymorphic) {
+  mlir::Type boxType;
+  if (typeSourceBox || isPolymorphic)
+    boxType = fir::ClassType::get(fir::HeapType::get(type));
+  else
+    boxType = fir::BoxType::get(fir::HeapType::get(type));
   auto boxAddr = builder.createTemporary(loc, boxType, name);
   auto box =
       fir::MutableBoxValue(boxAddr, /*nonDeferredParams=*/mlir::ValueRange(),
                            /*mutableProperties=*/{});
-  MutablePropertyWriter{builder, loc, box}.setUnallocatedStatus();
+  MutablePropertyWriter{builder, loc, box, typeSourceBox}
+      .setUnallocatedStatus();
   return box;
 }
 
@@ -366,6 +414,8 @@ static bool readToBoxValue(const fir::MutableBoxValue &box,
   // Track value as fir.box
   if ((box.isDerived() && mayBePolymorphic) || box.isUnlimitedPolymorphic())
     return true;
+  if (box.hasAssumedRank())
+    return true;
   // Intrinsic allocatables are contiguous, no need to track the value by
   // fir.box.
   if (box.isAllocatable() || box.rank() == 0)
@@ -379,15 +429,15 @@ static bool readToBoxValue(const fir::MutableBoxValue &box,
 fir::ExtendedValue
 fir::factory::genMutableBoxRead(fir::FirOpBuilder &builder, mlir::Location loc,
                                 const fir::MutableBoxValue &box,
-                                bool mayBePolymorphic) {
-  if (box.hasAssumedRank())
-    TODO(loc, "Assumed rank allocatables or pointers");
+                                bool mayBePolymorphic,
+                                bool preserveLowerBounds) {
   llvm::SmallVector<mlir::Value> lbounds;
   llvm::SmallVector<mlir::Value> extents;
   llvm::SmallVector<mlir::Value> lengths;
   if (readToBoxValue(box, mayBePolymorphic)) {
     auto reader = MutablePropertyReader(builder, loc, box);
-    reader.getLowerBounds(lbounds);
+    if (preserveLowerBounds && !box.hasAssumedRank())
+      reader.getLowerBounds(lbounds);
     return fir::BoxValue{reader.getIrBox(), lbounds,
                          box.nonDeferredLenParams()};
   }
@@ -395,6 +445,8 @@ fir::factory::genMutableBoxRead(fir::FirOpBuilder &builder, mlir::Location loc,
   // fir.box.
   auto addr =
       MutablePropertyReader(builder, loc, box).read(lbounds, extents, lengths);
+  if (!preserveLowerBounds)
+    lbounds.clear();
   auto rank = box.rank();
   if (box.isCharacter()) {
     auto len = lengths.empty() ? mlir::Value{} : lengths[0];
@@ -402,8 +454,13 @@ fir::factory::genMutableBoxRead(fir::FirOpBuilder &builder, mlir::Location loc,
       return fir::CharArrayBoxValue{addr, len, extents, lbounds};
     return fir::CharBoxValue{addr, len};
   }
+  mlir::Value sourceBox;
+  if (box.isPolymorphic())
+    sourceBox = builder.create<fir::LoadOp>(loc, box.getAddr());
   if (rank)
-    return fir::ArrayBoxValue{addr, extents, lbounds};
+    return fir::ArrayBoxValue{addr, extents, lbounds, sourceBox};
+  if (box.isPolymorphic())
+    return fir::PolymorphicValue(addr, sourceBox);
   return addr;
 }
 
@@ -412,15 +469,20 @@ fir::factory::genIsAllocatedOrAssociatedTest(fir::FirOpBuilder &builder,
                                              mlir::Location loc,
                                              const fir::MutableBoxValue &box) {
   auto addr = MutablePropertyReader(builder, loc, box).readBaseAddress();
-  return builder.genIsNotNull(loc, addr);
+  return builder.genIsNotNullAddr(loc, addr);
 }
 
-/// Generate finalizer call and inlined free. This does not check that the
-/// address was allocated.
-static void genFinalizeAndFree(fir::FirOpBuilder &builder, mlir::Location loc,
-                               mlir::Value addr) {
-  // TODO: call finalizer if any.
+mlir::Value fir::factory::genIsNotAllocatedOrAssociatedTest(
+    fir::FirOpBuilder &builder, mlir::Location loc,
+    const fir::MutableBoxValue &box) {
+  auto addr = MutablePropertyReader(builder, loc, box).readBaseAddress();
+  return builder.genIsNullAddr(loc, addr);
+}
 
+/// Call freemem. This does not check that the
+/// address was allocated.
+static void genFreemem(fir::FirOpBuilder &builder, mlir::Location loc,
+                       mlir::Value addr) {
   // A heap (ALLOCATABLE) object may have been converted to a ptr (POINTER),
   // so make sure the heap type is restored before deallocation.
   auto cast = builder.createConvert(
@@ -428,16 +490,16 @@ static void genFinalizeAndFree(fir::FirOpBuilder &builder, mlir::Location loc,
   builder.create<fir::FreeMemOp>(loc, cast);
 }
 
-void fir::factory::genFinalization(fir::FirOpBuilder &builder,
-                                   mlir::Location loc,
-                                   const fir::MutableBoxValue &box) {
+void fir::factory::genFreememIfAllocated(fir::FirOpBuilder &builder,
+                                         mlir::Location loc,
+                                         const fir::MutableBoxValue &box) {
   auto addr = MutablePropertyReader(builder, loc, box).readBaseAddress();
-  auto isAllocated = builder.genIsNotNull(loc, addr);
+  auto isAllocated = builder.genIsNotNullAddr(loc, addr);
   auto ifOp = builder.create<fir::IfOp>(loc, isAllocated,
                                         /*withElseRegion=*/false);
   auto insPt = builder.saveInsertionPoint();
-  builder.setInsertionPointToStart(&ifOp.thenRegion().front());
-  genFinalizeAndFree(builder, loc, addr);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  ::genFreemem(builder, loc, addr);
   builder.restoreInsertionPoint(insPt);
 }
 
@@ -452,18 +514,27 @@ void fir::factory::associateMutableBox(fir::FirOpBuilder &builder,
                                        mlir::ValueRange lbounds) {
   MutablePropertyWriter writer(builder, loc, box);
   source.match(
+      [&](const fir::PolymorphicValue &p) {
+        mlir::Value sourceBox;
+        if (auto polyBox = source.getBoxOf<fir::PolymorphicValue>())
+          sourceBox = polyBox->getSourceBox();
+        writer.updateMutableBox(p.getAddr(), /*lbounds=*/std::nullopt,
+                                /*extents=*/std::nullopt,
+                                /*lengths=*/std::nullopt, sourceBox);
+      },
       [&](const fir::UnboxedValue &addr) {
-        writer.updateMutableBox(addr, /*lbounds=*/llvm::None,
-                                /*extents=*/llvm::None, /*lengths=*/llvm::None);
+        writer.updateMutableBox(addr, /*lbounds=*/std::nullopt,
+                                /*extents=*/std::nullopt,
+                                /*lengths=*/std::nullopt);
       },
       [&](const fir::CharBoxValue &ch) {
-        writer.updateMutableBox(ch.getAddr(), /*lbounds=*/llvm::None,
-                                /*extents=*/llvm::None, {ch.getLen()});
+        writer.updateMutableBox(ch.getAddr(), /*lbounds=*/std::nullopt,
+                                /*extents=*/std::nullopt, {ch.getLen()});
       },
       [&](const fir::ArrayBoxValue &arr) {
         writer.updateMutableBox(arr.getAddr(),
                                 lbounds.empty() ? arr.getLBounds() : lbounds,
-                                arr.getExtents(), /*lengths=*/llvm::None);
+                                arr.getExtents(), /*lengths=*/std::nullopt);
       },
       [&](const fir::CharArrayBoxValue &arr) {
         writer.updateMutableBox(arr.getAddr(),
@@ -476,17 +547,24 @@ void fir::factory::associateMutableBox(fir::FirOpBuilder &builder,
         mlir::ValueRange newLbounds = lbounds.empty()
                                           ? mlir::ValueRange{arr.getLBounds()}
                                           : mlir::ValueRange{lbounds};
-        if (box.isDescribedByVariables()) {
+        if (box.hasAssumedRank()) {
+          assert(arr.hasAssumedRank() &&
+                 "expect both arr and box to be assumed-rank");
+          mlir::Value reboxed = builder.create<fir::ReboxAssumedRankOp>(
+              loc, box.getBoxTy(), arr.getAddr(),
+              fir::LowerBoundModifierAttribute::Preserve);
+          writer.updateWithIrBox(reboxed);
+        } else if (box.isDescribedByVariables()) {
           // LHS is a contiguous pointer described by local variables. Open RHS
           // fir.box to update the LHS.
           auto rawAddr = builder.create<fir::BoxAddrOp>(loc, arr.getMemTy(),
                                                         arr.getAddr());
-          auto extents = fir::factory::getExtents(builder, loc, source);
+          auto extents = fir::factory::getExtents(loc, builder, source);
           llvm::SmallVector<mlir::Value> lenParams;
           if (arr.isCharacter()) {
             lenParams.emplace_back(
                 fir::factory::readCharLen(builder, loc, source));
-          } else if (arr.isDerivedWithLengthParameters()) {
+          } else if (arr.isDerivedWithLenParameters()) {
             TODO(loc, "pointer assignment to derived with length parameters");
           }
           writer.updateMutableBox(rawAddr, newLbounds, extents, lenParams);
@@ -511,7 +589,7 @@ void fir::factory::associateMutableBox(fir::FirOpBuilder &builder,
                             "Cannot write MutableBox to another MutableBox");
       },
       [&](const fir::ProcBoxValue &) {
-        TODO(loc, "Procedure pointer assignment");
+        TODO(loc, "procedure pointer assignment");
       });
 }
 
@@ -527,9 +605,9 @@ void fir::factory::associateMutableBoxWithRemap(
     for (auto [lb, ub] : llvm::zip(lbounds, ubounds)) {
       auto lbi = builder.createConvert(loc, idxTy, lb);
       auto ubi = builder.createConvert(loc, idxTy, ub);
-      auto diff = builder.create<arith::SubIOp>(loc, idxTy, ubi, lbi);
+      auto diff = builder.create<mlir::arith::SubIOp>(loc, idxTy, ubi, lbi);
       extents.emplace_back(
-          builder.create<arith::AddIOp>(loc, idxTy, diff, one));
+          builder.create<mlir::arith::AddIOp>(loc, idxTy, diff, one));
     }
   } else {
     // lbounds are default. Upper bounds and extents are the same.
@@ -542,7 +620,7 @@ void fir::factory::associateMutableBoxWithRemap(
   auto cast = [&](mlir::Value addr) -> mlir::Value {
     // Cast base addr to new sequence type.
     auto ty = fir::dyn_cast_ptrEleTy(addr.getType());
-    if (auto seqTy = ty.dyn_cast<fir::SequenceType>()) {
+    if (auto seqTy = mlir::dyn_cast<fir::SequenceType>(ty)) {
       fir::SequenceType::Shape shape(newRank,
                                      fir::SequenceType::getUnknownExtent());
       ty = fir::SequenceType::get(shape, seqTy.getEleTy());
@@ -551,9 +629,13 @@ void fir::factory::associateMutableBoxWithRemap(
   };
   MutablePropertyWriter writer(builder, loc, box);
   source.match(
+      [&](const fir::PolymorphicValue &p) {
+        writer.updateMutableBox(cast(p.getAddr()), lbounds, extents,
+                                /*lengths=*/std::nullopt);
+      },
       [&](const fir::UnboxedValue &addr) {
         writer.updateMutableBox(cast(addr), lbounds, extents,
-                                /*lengths=*/llvm::None);
+                                /*lengths=*/std::nullopt);
       },
       [&](const fir::CharBoxValue &ch) {
         writer.updateMutableBox(cast(ch.getAddr()), lbounds, extents,
@@ -561,7 +643,7 @@ void fir::factory::associateMutableBoxWithRemap(
       },
       [&](const fir::ArrayBoxValue &arr) {
         writer.updateMutableBox(cast(arr.getAddr()), lbounds, extents,
-                                /*lengths=*/llvm::None);
+                                /*lengths=*/std::nullopt);
       },
       [&](const fir::CharArrayBoxValue &arr) {
         writer.updateMutableBox(cast(arr.getAddr()), lbounds, extents,
@@ -578,7 +660,7 @@ void fir::factory::associateMutableBoxWithRemap(
           if (arr.isCharacter()) {
             lenParams.emplace_back(
                 fir::factory::readCharLen(builder, loc, source));
-          } else if (arr.isDerivedWithLengthParameters()) {
+          } else if (arr.isDerivedWithLenParameters()) {
             TODO(loc, "pointer assignment to derived with length parameters");
           }
           writer.updateMutableBox(rawAddr, lbounds, extents, lenParams);
@@ -608,120 +690,260 @@ void fir::factory::associateMutableBoxWithRemap(
                             "Cannot write MutableBox to another MutableBox");
       },
       [&](const fir::ProcBoxValue &) {
-        TODO(loc, "Procedure pointer assignment");
+        TODO(loc, "procedure pointer assignment");
       });
 }
 
 void fir::factory::disassociateMutableBox(fir::FirOpBuilder &builder,
                                           mlir::Location loc,
-                                          const fir::MutableBoxValue &box) {
-  MutablePropertyWriter{builder, loc, box}.setUnallocatedStatus();
-}
-
-void fir::factory::genInlinedAllocation(fir::FirOpBuilder &builder,
-                                        mlir::Location loc,
-                                        const fir::MutableBoxValue &box,
-                                        mlir::ValueRange lbounds,
-                                        mlir::ValueRange extents,
-                                        mlir::ValueRange lenParams,
-                                        llvm::StringRef allocName) {
-  auto idxTy = builder.getIndexType();
-  llvm::SmallVector<mlir::Value> lengths;
-  if (auto charTy = box.getEleTy().dyn_cast<fir::CharacterType>()) {
-    if (charTy.getLen() == fir::CharacterType::unknownLen()) {
-      if (box.hasNonDeferredLenParams())
-        lengths.emplace_back(
-            builder.createConvert(loc, idxTy, box.nonDeferredLenParams()[0]));
-      else if (!lenParams.empty())
-        lengths.emplace_back(builder.createConvert(loc, idxTy, lenParams[0]));
-      else
-        fir::emitFatalError(
-            loc, "could not deduce character lengths in character allocation");
+                                          const fir::MutableBoxValue &box,
+                                          bool polymorphicSetType,
+                                          unsigned allocator) {
+  if (box.isPolymorphic() && polymorphicSetType) {
+    // 7.3.2.3 point 7. The dynamic type of a disassociated pointer is the
+    // same as its declared type.
+    auto boxTy = mlir::dyn_cast<fir::BaseBoxType>(box.getBoxTy());
+    auto eleTy = fir::unwrapPassByRefType(boxTy.getEleTy());
+    mlir::Type derivedType = fir::getDerivedType(eleTy);
+    if (auto recTy = mlir::dyn_cast<fir::RecordType>(derivedType)) {
+      fir::runtime::genNullifyDerivedType(builder, loc, box.getAddr(), recTy,
+                                          box.rank());
+      return;
     }
   }
-  mlir::Value heap = builder.create<fir::AllocMemOp>(
+  MutablePropertyWriter{builder, loc, box, {}, allocator}
+      .setUnallocatedStatus();
+}
+
+static llvm::SmallVector<mlir::Value>
+getNewLengths(fir::FirOpBuilder &builder, mlir::Location loc,
+              const fir::MutableBoxValue &box, mlir::ValueRange lenParams) {
+  llvm::SmallVector<mlir::Value> lengths;
+  auto idxTy = builder.getIndexType();
+  if (auto charTy = mlir::dyn_cast<fir::CharacterType>(box.getEleTy())) {
+    if (charTy.getLen() == fir::CharacterType::unknownLen()) {
+      if (box.hasNonDeferredLenParams()) {
+        lengths.emplace_back(
+            builder.createConvert(loc, idxTy, box.nonDeferredLenParams()[0]));
+      } else if (!lenParams.empty()) {
+        mlir::Value len =
+            fir::factory::genMaxWithZero(builder, loc, lenParams[0]);
+        lengths.emplace_back(builder.createConvert(loc, idxTy, len));
+      } else {
+        fir::emitFatalError(
+            loc, "could not deduce character lengths in character allocation");
+      }
+    }
+  }
+  return lengths;
+}
+
+static mlir::Value allocateAndInitNewStorage(fir::FirOpBuilder &builder,
+                                             mlir::Location loc,
+                                             const fir::MutableBoxValue &box,
+                                             mlir::ValueRange extents,
+                                             mlir::ValueRange lenParams,
+                                             llvm::StringRef allocName) {
+  auto lengths = getNewLengths(builder, loc, box, lenParams);
+  auto newStorage = builder.create<fir::AllocMemOp>(
       loc, box.getBaseTy(), allocName, lengths, extents);
-  // TODO: run initializer if any. Currently, there is no way to know this is
-  // required here.
-  MutablePropertyWriter{builder, loc, box}.updateMutableBox(heap, lbounds,
-                                                            extents, lengths);
+  if (mlir::isa<fir::RecordType>(box.getEleTy())) {
+    // TODO: skip runtime initialization if this is not required. Currently,
+    // there is no way to know here if a derived type needs it or not. But the
+    // information is available at compile time and could be reflected here
+    // somehow.
+    mlir::Value irBox = createNewFirBox(builder, loc, box, newStorage,
+                                        std::nullopt, extents, lengths);
+    fir::runtime::genDerivedTypeInitialize(builder, loc, irBox);
+  }
+  return newStorage;
 }
 
-void fir::factory::genInlinedDeallocate(fir::FirOpBuilder &builder,
-                                        mlir::Location loc,
-                                        const fir::MutableBoxValue &box) {
+void fir::factory::genInlinedAllocation(
+    fir::FirOpBuilder &builder, mlir::Location loc,
+    const fir::MutableBoxValue &box, mlir::ValueRange lbounds,
+    mlir::ValueRange extents, mlir::ValueRange lenParams,
+    llvm::StringRef allocName, bool mustBeHeap) {
+  auto lengths = getNewLengths(builder, loc, box, lenParams);
+  llvm::SmallVector<mlir::Value> safeExtents;
+  for (mlir::Value extent : extents)
+    safeExtents.push_back(fir::factory::genMaxWithZero(builder, loc, extent));
+  auto heap = builder.create<fir::AllocMemOp>(loc, box.getBaseTy(), allocName,
+                                              lengths, safeExtents);
+  MutablePropertyWriter{builder, loc, box}.updateMutableBox(
+      heap, lbounds, safeExtents, lengths);
+  if (mlir::isa<fir::RecordType>(box.getEleTy())) {
+    // TODO: skip runtime initialization if this is not required. Currently,
+    // there is no way to know here if a derived type needs it or not. But the
+    // information is available at compile time and could be reflected here
+    // somehow.
+    mlir::Value irBox = fir::factory::getMutableIRBox(builder, loc, box);
+    fir::runtime::genDerivedTypeInitialize(builder, loc, irBox);
+  }
+
+  heap->setAttr(fir::MustBeHeapAttr::getAttrName(),
+                fir::MustBeHeapAttr::get(builder.getContext(), mustBeHeap));
+}
+
+mlir::Value fir::factory::genFreemem(fir::FirOpBuilder &builder,
+                                     mlir::Location loc,
+                                     const fir::MutableBoxValue &box) {
   auto addr = MutablePropertyReader(builder, loc, box).readBaseAddress();
-  genFinalizeAndFree(builder, loc, addr);
+  ::genFreemem(builder, loc, addr);
   MutablePropertyWriter{builder, loc, box}.setUnallocatedStatus();
+  return addr;
 }
 
-void fir::factory::genReallocIfNeeded(fir::FirOpBuilder &builder,
-                                      mlir::Location loc,
-                                      const fir::MutableBoxValue &box,
-                                      mlir::ValueRange lbounds,
-                                      mlir::ValueRange shape,
-                                      mlir::ValueRange lengthParams) {
+fir::factory::MutableBoxReallocation fir::factory::genReallocIfNeeded(
+    fir::FirOpBuilder &builder, mlir::Location loc,
+    const fir::MutableBoxValue &box, mlir::ValueRange shape,
+    mlir::ValueRange lengthParams,
+    fir::factory::ReallocStorageHandlerFunc storageHandler) {
   // Implement 10.2.1.3 point 3 logic when lhs is an array.
   auto reader = MutablePropertyReader(builder, loc, box);
   auto addr = reader.readBaseAddress();
-  auto isAllocated = builder.genIsNotNull(loc, addr);
-  builder.genIfThenElse(loc, isAllocated)
-      .genThen([&]() {
-        // The box is allocated. Check if it must be reallocated and reallocate.
-        mlir::Value mustReallocate = builder.createBool(loc, false);
-        auto compareProperty = [&](mlir::Value previous, mlir::Value required) {
-          auto castPrevious =
-              builder.createConvert(loc, required.getType(), previous);
-          // reallocate = reallocate || previous != required
-          auto cmp = builder.create<arith::CmpIOp>(
-              loc, arith::CmpIPredicate::ne, castPrevious, required);
-          mustReallocate =
-              builder.create<mlir::SelectOp>(loc, cmp, cmp, mustReallocate);
-        };
-        llvm::SmallVector<mlir::Value> previousLbounds;
-        llvm::SmallVector<mlir::Value> previousExtents =
-            reader.readShape(&previousLbounds);
-        if (!shape.empty())
-          for (auto [previousExtent, requested] :
-               llvm::zip(previousExtents, shape))
-            compareProperty(previousExtent, requested);
+  auto i1Type = builder.getI1Type();
+  auto addrType = addr.getType();
+  auto isAllocated = builder.genIsNotNullAddr(loc, addr);
+  auto getExtValForStorage = [&](mlir::Value newAddr) -> fir::ExtendedValue {
+    mlir::SmallVector<mlir::Value> extents;
+    if (box.hasRank()) {
+      if (shape.empty())
+        extents = reader.readShape();
+      else
+        extents.append(shape.begin(), shape.end());
+    }
+    if (box.isCharacter()) {
+      auto len = box.hasNonDeferredLenParams() ? reader.readCharacterLength()
+                                               : lengthParams[0];
+      if (box.hasRank())
+        return fir::CharArrayBoxValue{newAddr, len, extents};
+      return fir::CharBoxValue{newAddr, len};
+    }
+    if (box.isDerivedWithLenParameters())
+      TODO(loc, "reallocation of derived type entities with length parameters");
+    if (box.hasRank())
+      return fir::ArrayBoxValue{newAddr, extents};
+    return newAddr;
+  };
+  auto ifOp =
+      builder
+          .genIfOp(loc, {i1Type, addrType}, isAllocated,
+                   /*withElseRegion=*/true)
+          .genThen([&]() {
+            // The box is allocated. Check if it must be reallocated and
+            // reallocate.
+            auto mustReallocate = builder.createBool(loc, false);
+            auto compareProperty = [&](mlir::Value previous,
+                                       mlir::Value required) {
+              auto castPrevious =
+                  builder.createConvert(loc, required.getType(), previous);
+              auto cmp = builder.create<mlir::arith::CmpIOp>(
+                  loc, mlir::arith::CmpIPredicate::ne, castPrevious, required);
+              mustReallocate = builder.create<mlir::arith::SelectOp>(
+                  loc, cmp, cmp, mustReallocate);
+            };
+            llvm::SmallVector<mlir::Value> previousExtents = reader.readShape();
+            if (!shape.empty())
+              for (auto [previousExtent, requested] :
+                   llvm::zip(previousExtents, shape))
+                compareProperty(previousExtent, requested);
 
-        if (box.isCharacter() && !box.hasNonDeferredLenParams()) {
-          // When the allocatable length is not deferred, it must not be
-          // reallocated in case of length mismatch, instead, padding/trimming
-          // will ocur in later assignment to it.
-          assert(!lengthParams.empty() &&
-                 "must provide length parameters for character");
-          compareProperty(reader.readCharacterLength(), lengthParams[0]);
-        } else if (box.isDerivedWithLengthParameters()) {
+            if (box.isCharacter() && !box.hasNonDeferredLenParams()) {
+              // When the allocatable length is not deferred, it must not be
+              // reallocated in case of length mismatch, instead,
+              // padding/trimming will occur in later assignment to it.
+              assert(!lengthParams.empty() &&
+                     "must provide length parameters for character");
+              compareProperty(reader.readCharacterLength(), lengthParams[0]);
+            } else if (box.isDerivedWithLenParameters()) {
+              TODO(loc, "automatic allocation of derived type allocatable with "
+                        "length parameters");
+            }
+            auto ifOp = builder
+                            .genIfOp(loc, {addrType}, mustReallocate,
+                                     /*withElseRegion=*/true)
+                            .genThen([&]() {
+                              // If shape or length mismatch, allocate new
+                              // storage. When rhs is a scalar, keep the
+                              // previous shape
+                              auto extents =
+                                  shape.empty()
+                                      ? mlir::ValueRange(previousExtents)
+                                      : shape;
+                              auto heap = allocateAndInitNewStorage(
+                                  builder, loc, box, extents, lengthParams,
+                                  ".auto.alloc");
+                              if (storageHandler)
+                                storageHandler(getExtValForStorage(heap));
+                              builder.create<fir::ResultOp>(loc, heap);
+                            })
+                            .genElse([&]() {
+                              if (storageHandler)
+                                storageHandler(getExtValForStorage(addr));
+                              builder.create<fir::ResultOp>(loc, addr);
+                            });
+            ifOp.end();
+            auto newAddr = ifOp.getResults()[0];
+            builder.create<fir::ResultOp>(
+                loc, mlir::ValueRange{mustReallocate, newAddr});
+          })
+          .genElse([&]() {
+            auto trueValue = builder.createBool(loc, true);
+            // The box is not yet allocated, simply allocate it.
+            if (shape.empty() && box.rank() != 0) {
+              // See 10.2.1.3 p3.
+              fir::runtime::genReportFatalUserError(
+                  builder, loc,
+                  "array left hand side must be allocated when the right hand "
+                  "side is a scalar");
+              builder.create<fir::ResultOp>(loc,
+                                            mlir::ValueRange{trueValue, addr});
+            } else {
+              auto heap = allocateAndInitNewStorage(
+                  builder, loc, box, shape, lengthParams, ".auto.alloc");
+              if (storageHandler)
+                storageHandler(getExtValForStorage(heap));
+              builder.create<fir::ResultOp>(loc,
+                                            mlir::ValueRange{trueValue, heap});
+            }
+          });
+  ifOp.end();
+  auto wasReallocated = ifOp.getResults()[0];
+  auto newAddr = ifOp.getResults()[1];
+  // Create an ExtentedValue for the new storage.
+  auto newValue = getExtValForStorage(newAddr);
+  return {newValue, addr, wasReallocated, isAllocated};
+}
+
+void fir::factory::finalizeRealloc(fir::FirOpBuilder &builder,
+                                   mlir::Location loc,
+                                   const fir::MutableBoxValue &box,
+                                   mlir::ValueRange lbounds,
+                                   bool takeLboundsIfRealloc,
+                                   const MutableBoxReallocation &realloc) {
+  builder.genIfThen(loc, realloc.wasReallocated)
+      .genThen([&]() {
+        auto reader = MutablePropertyReader(builder, loc, box);
+        llvm::SmallVector<mlir::Value> previousLbounds;
+        if (!takeLboundsIfRealloc && box.hasRank())
+          reader.readShape(&previousLbounds);
+        auto lbs =
+            takeLboundsIfRealloc ? lbounds : mlir::ValueRange{previousLbounds};
+        llvm::SmallVector<mlir::Value> lenParams;
+        if (box.isCharacter())
+          lenParams.push_back(fir::getLen(realloc.newValue));
+        if (box.isDerivedWithLenParameters())
           TODO(loc,
-               "automatic allocation of derived type allocatable with length "
-               "parameters");
-        }
-        builder.genIfThen(loc, mustReallocate)
-            .genThen([&]() {
-              // If shape or length mismatch, deallocate and reallocate.
-              genFinalizeAndFree(builder, loc, addr);
-              // When rhs is a scalar, keep the previous shape
-              auto extents =
-                  shape.empty() ? mlir::ValueRange(previousExtents) : shape;
-              auto lbs =
-                  shape.empty() ? mlir::ValueRange(previousLbounds) : lbounds;
-              genInlinedAllocation(builder, loc, box, lbs, extents,
-                                   lengthParams, ".auto.alloc");
-            })
+               "reallocation of derived type entities with length parameters");
+        auto lengths = getNewLengths(builder, loc, box, lenParams);
+        auto heap = fir::getBase(realloc.newValue);
+        auto extents = fir::factory::getExtents(loc, builder, realloc.newValue);
+        builder.genIfThen(loc, realloc.oldAddressWasAllocated)
+            .genThen([&]() { ::genFreemem(builder, loc, realloc.oldAddress); })
             .end();
-      })
-      .genElse([&]() {
-        // The box is not yet allocated, simply allocate it.
-        if (shape.empty() && box.rank() != 0) {
-          // TODO:
-          // runtime error: right hand side must be allocated if right hand
-          // side is a scalar and the box is an array.
-        } else {
-          genInlinedAllocation(builder, loc, box, lbounds, shape, lengthParams,
-                               ".auto.alloc");
-        }
+        MutablePropertyWriter{builder, loc, box}.updateMutableBox(
+            heap, lbs, extents, lengths);
       })
       .end();
 }
@@ -743,4 +965,14 @@ void fir::factory::syncMutableBoxFromIRBox(fir::FirOpBuilder &builder,
                                            mlir::Location loc,
                                            const fir::MutableBoxValue &box) {
   MutablePropertyWriter{builder, loc, box}.syncMutablePropertiesFromIRBox();
+}
+
+mlir::Value fir::factory::genNullBoxStorage(fir::FirOpBuilder &builder,
+                                            mlir::Location loc,
+                                            mlir::Type boxTy) {
+  mlir::Value boxStorage = builder.createTemporary(loc, boxTy);
+  mlir::Value nullBox = fir::factory::createUnallocatedBox(
+      builder, loc, boxTy, /*nonDeferredParams=*/{});
+  builder.create<fir::StoreOp>(loc, nullBox, boxStorage);
+  return boxStorage;
 }

@@ -15,17 +15,17 @@
 ; 3: DwarfUnit::addUInt()
 ; 4: addUInt(Block, (dwarf::Attribute)0, Form, Integer);
 
-; CHECK: DW_AT_noreturn
 ; CHECK: DW_AT_name      ("var")
 ; CHECK-NOT: DW_TAG_
 ; CHECK: DW_AT_alignment
 ; CHECK: DW_AT_location  (DW_OP_addr 0x0)
+; CHECK: DW_AT_noreturn
 ;
-; STRICT-NOT: DW_AT_noreturn
 ; STRICT: DW_AT_name      ("var")
 ; STRICT-NOT: DW_AT_alignment
 ; STRICT-NOT: DW_TAG_
 ; STRICT: DW_AT_location  (DW_OP_addr 0x0)
+; STRICT-NOT: DW_AT_noreturn
 
 @_ZL3var = internal global i32 0, align 16, !dbg !0
 
@@ -41,7 +41,7 @@ declare void @_Z4exitv()
 ; Function Attrs: noinline nounwind optnone uwtable mustprogress
 define dso_local signext i32 @_Z3foov() !dbg !17 {
 entry:
-  %0 = load i32, i32* @_ZL3var, align 16, !dbg !21
+  %0 = load i32, ptr @_ZL3var, align 16, !dbg !21
   ret i32 %0, !dbg !22
 }
 

@@ -81,7 +81,8 @@ InstrumentationRuntimeMainThreadChecker::RetrieveReportData(
     return StructuredData::ObjectSP();
 
   ThreadSP thread_sp = exe_ctx_ref.GetThreadSP();
-  StackFrameSP frame_sp = thread_sp->GetSelectedFrame();
+  StackFrameSP frame_sp =
+      thread_sp->GetSelectedFrame(DoNoSelectMostRelevantFrame);
   ModuleSP runtime_module_sp = GetRuntimeModuleSP();
   Target &target = process_sp->GetTarget();
 
@@ -100,14 +101,14 @@ InstrumentationRuntimeMainThreadChecker::RetrieveReportData(
   if (!apiname_ptr)
     return StructuredData::ObjectSP();
 
-  std::string apiName = "";
+  std::string apiName;
   Status read_error;
   target.ReadCStringFromMemory(apiname_ptr, apiName, read_error);
   if (read_error.Fail())
     return StructuredData::ObjectSP();
 
-  std::string className = "";
-  std::string selector = "";
+  std::string className;
+  std::string selector;
   if (apiName.substr(0, 2) == "-[") {
     size_t spacePos = apiName.find(' ');
     if (spacePos != std::string::npos) {
@@ -131,7 +132,7 @@ InstrumentationRuntimeMainThreadChecker::RetrieveReportData(
       responsible_frame = frame;
 
     lldb::addr_t PC = addr.GetLoadAddress(&target);
-    trace->AddItem(StructuredData::ObjectSP(new StructuredData::Integer(PC)));
+    trace->AddIntegerItem(PC);
   }
 
   auto *d = new StructuredData::Dictionary();
@@ -214,8 +215,9 @@ void InstrumentationRuntimeMainThreadChecker::Activate() {
           .CreateBreakpoint(symbol_address, /*internal=*/true,
                             /*hardware=*/false)
           .get();
+  const bool sync = false;
   breakpoint->SetCallback(
-      InstrumentationRuntimeMainThreadChecker::NotifyBreakpointHit, this, true);
+      InstrumentationRuntimeMainThreadChecker::NotifyBreakpointHit, this, sync);
   breakpoint->SetBreakpointKind("main-thread-checker-report");
   SetBreakpointID(breakpoint->GetID());
 
@@ -250,7 +252,7 @@ InstrumentationRuntimeMainThreadChecker::GetBacktracesFromExtendedStopInfo(
   std::vector<lldb::addr_t> PCs;
   auto trace = info->GetObjectForDotSeparatedPath("trace")->GetAsArray();
   trace->ForEach([&PCs](StructuredData::Object *PC) -> bool {
-    PCs.push_back(PC->GetAsInteger()->GetValue());
+    PCs.push_back(PC->GetUnsignedIntegerValue());
     return true;
   });
 
@@ -259,7 +261,8 @@ InstrumentationRuntimeMainThreadChecker::GetBacktracesFromExtendedStopInfo(
 
   StructuredData::ObjectSP thread_id_obj =
       info->GetObjectForDotSeparatedPath("tid");
-  tid_t tid = thread_id_obj ? thread_id_obj->GetIntegerValue() : 0;
+  lldb::tid_t tid =
+      thread_id_obj ? thread_id_obj->GetUnsignedIntegerValue() : 0;
 
   // We gather symbolication addresses above, so no need for HistoryThread to
   // try to infer the call addresses.

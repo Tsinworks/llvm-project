@@ -136,7 +136,7 @@ static bool isYmmOrZmmReg(unsigned Reg) {
 }
 
 static bool checkFnHasLiveInYmmOrZmm(MachineRegisterInfo &MRI) {
-  for (std::pair<unsigned, unsigned> LI : MRI.liveins())
+  for (std::pair<MCRegister, Register> LI : MRI.liveins())
     if (isYmmOrZmmReg(LI.first))
       return true;
 
@@ -297,11 +297,10 @@ bool VZeroUpperInserter::runOnMachineFunction(MachineFunction &MF) {
   // need to insert any VZEROUPPER instructions.  This is constant-time, so it
   // is cheap in the common case of no ymm/zmm use.
   bool YmmOrZmmUsed = FnHasLiveInYmmOrZmm;
-  for (auto *RC : {&X86::VR256RegClass, &X86::VR512_0_15RegClass}) {
+  for (const auto *RC : {&X86::VR256RegClass, &X86::VR512_0_15RegClass}) {
     if (!YmmOrZmmUsed) {
-      for (TargetRegisterClass::iterator i = RC->begin(), e = RC->end(); i != e;
-           i++) {
-        if (!MRI.reg_nodbg_empty(*i)) {
+      for (MCPhysReg R : *RC) {
+        if (!MRI.reg_nodbg_empty(R)) {
           YmmOrZmmUsed = true;
           break;
         }

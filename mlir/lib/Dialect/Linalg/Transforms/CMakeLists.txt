@@ -1,26 +1,45 @@
 add_mlir_dialect_library(MLIRLinalgTransforms
-  Bufferize.cpp
-  CodegenStrategy.cpp
-  ComprehensiveBufferizePass.cpp
+  AllInterfaces.cpp
+  BubbleUpExtractSlice.cpp
+  BufferizableOpInterfaceImpl.cpp
+  ConstantFold.cpp
+  ConvertToDestinationStyle.cpp
+  ConvertConv2DToImg2Col.cpp
+  DataLayoutPropagation.cpp
+  DecomposeLinalgOps.cpp
   Detensorize.cpp
-  Distribution.cpp
   DropUnitDims.cpp
   ElementwiseOpFusion.cpp
   ElementwiseToLinalg.cpp
+  EliminateEmptyTensors.cpp
+  EraseUnusedOperandsAndResults.cpp
+  FoldAddIntoDest.cpp
+  FusePadOpWithLinalgProducer.cpp
   Fusion.cpp
-  FusionOnTensors.cpp
   Generalization.cpp
   Hoisting.cpp
   HoistPadding.cpp
   InlineScalarOperands.cpp
   Interchange.cpp
   Loops.cpp
-  LinalgStrategyPasses.cpp
+  TransposeMatmul.cpp
+  MeshShardingInterfaceImpl.cpp
   NamedOpConversions.cpp
+  BlockPackMatmul.cpp
+  Padding.cpp
   Promotion.cpp
+  RuntimeOpVerification.cpp
+  Specialize.cpp
+  Split.cpp
+  SplitReduction.cpp
+  SubsetInsertionOpInterfaceImpl.cpp
+  SwapExtractSliceWithFillPatterns.cpp
   Tiling.cpp
+  TilingInterfaceImpl.cpp
   Transforms.cpp
+  TransposeConv2D.cpp
   Vectorization.cpp
+  WinogradConv2D.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Linalg
@@ -29,35 +48,37 @@ add_mlir_dialect_library(MLIRLinalgTransforms
   MLIRLinalgPassIncGen
 
   LINK_LIBS PUBLIC
-  MLIRAffine
-  MLIRAffineBufferizableOpInterfaceImpl
+  MLIRAffineDialect
   MLIRAffineUtils
   MLIRAnalysis
-  MLIRArithBufferizableOpInterfaceImpl
-  MLIRArithmetic
-  MLIRBufferizableOpInterface
-  MLIRComplex
-  MLIRComprehensiveBufferize
+  MLIRArithDialect
+  MLIRArithTransforms
+  MLIRArithUtils
+  MLIRComplexDialect
+  MLIRDestinationStyleOpInterface
+  MLIRDialectUtils
+  MLIRFuncDialect
+  MLIRFuncTransforms
+  MLIRIndexDialect
   MLIRInferTypeOpInterface
   MLIRIR
-  MLIRMemRef
-  MLIRLinalg
-  MLIRLinalgAnalysis
-  MLIRLinalgBufferizableOpInterfaceImpl
+  MLIRMemRefDialect
+  MLIRMemRefTransforms
+  MLIRMeshTransforms
+  MLIRLinalgDialect
   MLIRLinalgUtils
-  MLIRSCF
-  MLIRSCFBufferizableOpInterfaceImpl
+  MLIRSCFDialect
   MLIRSCFTransforms
   MLIRPass
-  MLIRStandard
-  MLIRStandardOpsTransforms
-  MLIRStandardToLLVM
-  MLIRTensor
-  MLIRTensorBufferizableOpInterfaceImpl
+  MLIRSubsetOpInterface
+  MLIRSparseTensorDialect
+  MLIRTensorDialect
+  MLIRTensorTilingInterfaceImpl
   MLIRTransforms
   MLIRTransformUtils
-  MLIRVector
-  MLIRVectorBufferizableOpInterfaceImpl
-  MLIRX86VectorTransforms
+  MLIRValueBoundsOpInterface
+  MLIRVectorDialect
+  MLIRVectorTransforms
+  MLIRVectorUtils
   MLIRVectorToSCF
 )

@@ -128,7 +128,7 @@ protected:
           continue;
 
         Register AddendSrcReg = AddendMI->getOperand(1).getReg();
-        if (Register::isVirtualRegister(AddendSrcReg)) {
+        if (AddendSrcReg.isVirtual()) {
           if (MRI.getRegClass(AddendMI->getOperand(0).getReg()) !=
               MRI.getRegClass(AddendSrcReg))
             continue;
@@ -209,7 +209,7 @@ protected:
         // legality checks above, the live range for the addend source register
         // could be extended), but it seems likely that such a trivial copy can
         // be coalesced away later, and thus is not worth the effort.
-        if (Register::isVirtualRegister(AddendSrcReg) &&
+        if (AddendSrcReg.isVirtual() &&
             !LIS->getInterval(AddendSrcReg).liveAt(FMAIdx))
           continue;
 
@@ -297,18 +297,16 @@ protected:
         // fma result.
 
         LiveInterval &NewFMAInt = LIS->getInterval(KilledProdReg);
-        for (LiveInterval::iterator AI = FMAInt.begin(), AE = FMAInt.end();
-             AI != AE; ++AI) {
+        for (auto &AI : FMAInt) {
           // Don't add the segment that corresponds to the original copy.
-          if (AI->valno == AddendValNo)
+          if (AI.valno == AddendValNo)
             continue;
 
           VNInfo *NewFMAValNo =
-            NewFMAInt.getNextValue(AI->start,
-                                   LIS->getVNInfoAllocator());
+              NewFMAInt.getNextValue(AI.start, LIS->getVNInfoAllocator());
 
-          NewFMAInt.addSegment(LiveInterval::Segment(AI->start, AI->end,
-                                                     NewFMAValNo));
+          NewFMAInt.addSegment(
+              LiveInterval::Segment(AI.start, AI.end, NewFMAValNo));
         }
         LLVM_DEBUG(dbgs() << "  extended: " << NewFMAInt << '\n');
 
@@ -316,10 +314,7 @@ protected:
         // copy to be removed, or somewhere in between there and here). This
         // is necessary only if it is a physical register.
         if (!AddendSrcReg.isVirtual())
-          for (MCRegUnitIterator Units(AddendSrcReg.asMCReg(), TRI);
-               Units.isValid(); ++Units) {
-            unsigned Unit = *Units;
-
+          for (MCRegUnit Unit : TRI->regunits(AddendSrcReg.asMCReg())) {
             LiveRange &AddendSrcRange = LIS->getRegUnit(Unit);
             AddendSrcRange.extendInBlock(LIS->getMBBStartIdx(&MBB),
                                          FMAIdx.getRegSlot());
@@ -352,7 +347,7 @@ public:
       if (!STI.hasVSX())
         return false;
 
-      LIS = &getAnalysis<LiveIntervals>();
+      LIS = &getAnalysis<LiveIntervalsWrapperPass>().getLIS();
 
       TII = STI.getInstrInfo();
 
@@ -369,12 +364,12 @@ public:
     }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.addRequired<LiveIntervals>();
-      AU.addPreserved<LiveIntervals>();
-      AU.addRequired<SlotIndexes>();
-      AU.addPreserved<SlotIndexes>();
-      AU.addRequired<MachineDominatorTree>();
-      AU.addPreserved<MachineDominatorTree>();
+      AU.addRequired<LiveIntervalsWrapperPass>();
+      AU.addPreserved<LiveIntervalsWrapperPass>();
+      AU.addRequired<SlotIndexesWrapperPass>();
+      AU.addPreserved<SlotIndexesWrapperPass>();
+      AU.addRequired<MachineDominatorTreeWrapperPass>();
+      AU.addPreserved<MachineDominatorTreeWrapperPass>();
       MachineFunctionPass::getAnalysisUsage(AU);
     }
   };
@@ -382,9 +377,9 @@ public:
 
 INITIALIZE_PASS_BEGIN(PPCVSXFMAMutate, DEBUG_TYPE,
                       "PowerPC VSX FMA Mutation", false, false)
-INITIALIZE_PASS_DEPENDENCY(LiveIntervals)
-INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
-INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(LiveIntervalsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(SlotIndexesWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTreeWrapperPass)
 INITIALIZE_PASS_END(PPCVSXFMAMutate, DEBUG_TYPE,
                     "PowerPC VSX FMA Mutation", false, false)
 

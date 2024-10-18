@@ -11,9 +11,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/TableGen/Predicate.h"
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/TableGen/Error.h"
 #include "llvm/TableGen/Record.h"
@@ -28,7 +28,7 @@ Pred::Pred(const llvm::Record *record) : def(record) {
 }
 
 // Construct a Predicate from an initializer.
-Pred::Pred(const llvm::Init *init) : def(nullptr) {
+Pred::Pred(const llvm::Init *init) {
   if (const auto *defInit = dyn_cast_or_null<llvm::DefInit>(init))
     def = defInit->getDef();
 }
@@ -46,7 +46,7 @@ bool Pred::isCombined() const {
   return def && def->isSubClassOf("CombinedPred");
 }
 
-ArrayRef<llvm::SMLoc> Pred::getLoc() const { return def->getLoc(); }
+ArrayRef<SMLoc> Pred::getLoc() const { return def->getLoc(); }
 
 CPred::CPred(const llvm::Record *record) : Pred(record) {
   assert(def->isSubClassOf("CPred") &&
@@ -79,7 +79,7 @@ const llvm::Record *CombinedPred::getCombinerDef() const {
   return def->getValueAsDef("kind");
 }
 
-const std::vector<llvm::Record *> CombinedPred::getChildren() const {
+std::vector<const llvm::Record *> CombinedPred::getChildren() const {
   assert(def->getValue("children") &&
          "CombinedPred must have a value 'children'");
   return def->getValueAsListOfDefs("children");
@@ -286,7 +286,8 @@ propagateGroundTruth(PredNode *node,
 // Combine a list of predicate expressions using a binary combiner.  If a list
 // is empty, return "init".
 static std::string combineBinary(ArrayRef<std::string> children,
-                                 std::string combiner, std::string init) {
+                                 const std::string &combiner,
+                                 std::string init) {
   if (children.empty())
     return init;
 
@@ -300,7 +301,7 @@ static std::string combineBinary(ArrayRef<std::string> children,
   for (unsigned i = 1; i < size; ++i) {
     os << ' ' << combiner << " (" << children[i] << ')';
   }
-  return os.str();
+  return str;
 }
 
 // Prepend negation to the only condition in the predicate expression list.

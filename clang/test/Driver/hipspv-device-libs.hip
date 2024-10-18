@@ -1,5 +1,3 @@
-// REQUIRES: clang-driver
-// REQUIRES: x86-registered-target
 // UNSUPPORTED: system-windows
 
 // RUN: %clang -### -target x86_64-linux-gnu --offload=spirv64 \

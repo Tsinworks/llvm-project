@@ -299,13 +299,13 @@ public:
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isDependentType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isOverloadableType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isArrayType)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isConstantArrayType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasPointerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasObjCPointerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasIntegerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasSignedIntegerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasUnsignedIntegerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasFloatingRepresentation)
-  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isPromotableIntegerType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isSignedIntegerType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isUnsignedIntegerType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isSignedIntegerOrEnumerationType)
@@ -529,7 +529,7 @@ struct CanProxyAdaptor<FunctionProtoType>
 
 template<>
 struct CanProxyAdaptor<TypeOfType> : public CanProxyBase<TypeOfType> {
-  LLVM_CLANG_CANPROXY_TYPE_ACCESSOR(getUnderlyingType)
+  LLVM_CLANG_CANPROXY_TYPE_ACCESSOR(getUnmodifiedType)
 };
 
 template<>

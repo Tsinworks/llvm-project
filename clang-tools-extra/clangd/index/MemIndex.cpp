@@ -9,9 +9,7 @@
 #include "MemIndex.h"
 #include "FuzzyMatch.h"
 #include "Quality.h"
-#include "support/Logger.h"
 #include "support/Trace.h"
-#include "clang/Index/IndexSymbol.h"
 
 namespace clang {
 namespace clangd {
@@ -33,7 +31,7 @@ bool MemIndex::fuzzyFind(
   trace::Span Tracer("MemIndex fuzzyFind");
 
   TopN<std::pair<float, const Symbol *>> Top(
-      Req.Limit ? *Req.Limit : std::numeric_limits<size_t>::max());
+      Req.Limit.value_or(std::numeric_limits<size_t>::max()));
   FuzzyMatcher Filter(Req.Query);
   bool More = false;
   for (const auto &Pair : Index) {
@@ -70,8 +68,7 @@ void MemIndex::lookup(const LookupRequest &Req,
 bool MemIndex::refs(const RefsRequest &Req,
                     llvm::function_ref<void(const Ref &)> Callback) const {
   trace::Span Tracer("MemIndex refs");
-  uint32_t Remaining =
-      Req.Limit.getValueOr(std::numeric_limits<uint32_t>::max());
+  uint32_t Remaining = Req.Limit.value_or(std::numeric_limits<uint32_t>::max());
   for (const auto &ReqID : Req.IDs) {
     auto SymRefs = Refs.find(ReqID);
     if (SymRefs == Refs.end())
@@ -91,8 +88,7 @@ bool MemIndex::refs(const RefsRequest &Req,
 void MemIndex::relations(
     const RelationsRequest &Req,
     llvm::function_ref<void(const SymbolID &, const Symbol &)> Callback) const {
-  uint32_t Remaining =
-      Req.Limit.getValueOr(std::numeric_limits<uint32_t>::max());
+  uint32_t Remaining = Req.Limit.value_or(std::numeric_limits<uint32_t>::max());
   for (const SymbolID &Subject : Req.Subjects) {
     LookupRequest LookupReq;
     auto It = Relations.find(

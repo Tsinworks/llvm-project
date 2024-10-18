@@ -59,7 +59,7 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
       uint32_t idx;
       const uint32_t count = m_current_value.GetSize();
       if (!llvm::to_integer(args.GetArgumentAtIndex(0), idx) || idx > count) {
-        error.SetErrorStringWithFormat(
+        error = Status::FromErrorStringWithFormat(
             "invalid file list index %s, index must be 0 through %u",
             args.GetArgumentAtIndex(0), count);
       } else {
@@ -73,15 +73,16 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
         NotifyValueChanged();
       }
     } else {
-      error.SetErrorString("replace operation takes an array index followed by "
-                           "one or more values");
+      error = Status::FromErrorString(
+          "replace operation takes an array index followed by "
+          "one or more values");
     }
     break;
 
   case eVarSetOperationAssign:
     m_current_value.Clear();
     // Fall through to append case
-    LLVM_FALLTHROUGH;
+    [[fallthrough]];
   case eVarSetOperationAppend:
     if (argc > 0) {
       m_value_was_set = true;
@@ -91,7 +92,7 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
       }
       NotifyValueChanged();
     } else {
-      error.SetErrorString(
+      error = Status::FromErrorString(
           "assign operation takes at least one file path argument");
     }
     break;
@@ -102,7 +103,7 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
       uint32_t idx;
       const uint32_t count = m_current_value.GetSize();
       if (!llvm::to_integer(args.GetArgumentAtIndex(0), idx) || idx > count) {
-        error.SetErrorStringWithFormat(
+        error = Status::FromErrorStringWithFormat(
             "invalid insert file list index %s, index must be 0 through %u",
             args.GetArgumentAtIndex(0), count);
       } else {
@@ -115,8 +116,9 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
         NotifyValueChanged();
       }
     } else {
-      error.SetErrorString("insert operation takes an array index followed by "
-                           "one or more values");
+      error = Status::FromErrorString(
+          "insert operation takes an array index followed by "
+          "one or more values");
     }
     break;
 
@@ -137,19 +139,20 @@ Status OptionValueFileSpecList::SetValueFromString(llvm::StringRef value,
         size_t num_remove_indexes = remove_indexes.size();
         if (num_remove_indexes) {
           // Sort and then erase in reverse so indexes are always valid
-          llvm::sort(remove_indexes.begin(), remove_indexes.end());
+          llvm::sort(remove_indexes);
           for (size_t j = num_remove_indexes - 1; j < num_remove_indexes; ++j) {
             m_current_value.Remove(j);
           }
         }
         NotifyValueChanged();
       } else {
-        error.SetErrorStringWithFormat(
+        error = Status::FromErrorStringWithFormat(
             "invalid array index '%s', aborting remove operation",
             args.GetArgumentAtIndex(i));
       }
     } else {
-      error.SetErrorString("remove operation takes one or more array index");
+      error = Status::FromErrorString(
+          "remove operation takes one or more array index");
     }
     break;
 

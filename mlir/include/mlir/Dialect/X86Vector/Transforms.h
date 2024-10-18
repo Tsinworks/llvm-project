@@ -17,7 +17,6 @@ class ImplicitLocOpBuilder;
 class LLVMConversionTarget;
 class LLVMTypeConverter;
 class RewritePatternSet;
-using OwningRewritePatternList = RewritePatternSet;
 
 namespace x86vector {
 
@@ -177,7 +176,7 @@ void populateSpecializedTransposeLoweringPatterns(
 /// Collect a set of patterns to lower X86Vector ops to ops that map to LLVM
 /// intrinsics.
 void populateX86VectorLegalizeForLLVMExportPatterns(
-    LLVMTypeConverter &converter, RewritePatternSet &patterns);
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 
 /// Configure the target to support lowering X86Vector ops to ops that map to
 /// LLVM intrinsics.

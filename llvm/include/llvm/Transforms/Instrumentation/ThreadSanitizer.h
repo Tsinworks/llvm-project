@@ -1,4 +1,4 @@
-//===- Transforms/Instrumentation/ThreadSanitizer.h - TSan Pass -----------===//
+//===- ThreadSanitizer.h - ThreadSanitizer instrumentation ------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -14,11 +14,10 @@
 #define LLVM_TRANSFORMS_INSTRUMENTATION_THREADSANITIZER_H
 
 #include "llvm/IR/PassManager.h"
-#include "llvm/Pass.h"
 
 namespace llvm {
-// Insert ThreadSanitizer (race detection) instrumentation
-FunctionPass *createThreadSanitizerLegacyPassPass();
+class Function;
+class Module;
 
 /// A function pass for tsan instrumentation.
 ///

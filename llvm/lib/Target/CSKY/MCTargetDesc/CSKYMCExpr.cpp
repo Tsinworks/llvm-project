@@ -8,10 +8,12 @@
 
 #include "CSKYMCExpr.h"
 #include "CSKYFixupKinds.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbolELF.h"
+#include "llvm/Support/Casting.h"
 
 using namespace llvm;
 
@@ -107,10 +109,9 @@ void CSKYMCExpr::fixELFSymbolsInTLSFixups(MCAssembler &Asm) const {
   fixELFSymbolsInTLSFixupsImpl(getSubExpr(), Asm);
 }
 
-bool CSKYMCExpr::evaluateAsRelocatableImpl(MCValue &Res,
-                                           const MCAsmLayout *Layout,
+bool CSKYMCExpr::evaluateAsRelocatableImpl(MCValue &Res, const MCAssembler *Asm,
                                            const MCFixup *Fixup) const {
-  if (!getSubExpr()->evaluateAsRelocatable(Res, Layout, Fixup))
+  if (!getSubExpr()->evaluateAsRelocatable(Res, Asm, Fixup))
     return false;
 
   // Some custom fixup types are not valid with symbol difference expressions

@@ -9,16 +9,16 @@
 #include "Config.h"
 #include "ConfigFragment.h"
 #include "ConfigTesting.h"
+#include "Diagnostics.h"
 #include "Feature.h"
 #include "TestFS.h"
 #include "clang/Basic/DiagnosticSema.h"
-#include "llvm/ADT/None.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include <optional>
 #include <string>
 
 namespace clang {
@@ -121,14 +121,15 @@ TEST_F(ConfigCompileTests, Condition) {
 }
 
 TEST_F(ConfigCompileTests, CompileCommands) {
+  Frag.CompileFlags.Compiler.emplace("tpc.exe");
   Frag.CompileFlags.Add.emplace_back("-foo");
   Frag.CompileFlags.Remove.emplace_back("--include-directory=");
   std::vector<std::string> Argv = {"clang", "-I", "bar/", "--", "a.cc"};
   EXPECT_TRUE(compileAndApply());
-  EXPECT_THAT(Conf.CompileFlags.Edits, SizeIs(2));
+  EXPECT_THAT(Conf.CompileFlags.Edits, SizeIs(3));
   for (auto &Edit : Conf.CompileFlags.Edits)
     Edit(Argv);
-  EXPECT_THAT(Argv, ElementsAre("clang", "-foo", "--", "a.cc"));
+  EXPECT_THAT(Argv, ElementsAre("tpc.exe", "-foo", "--", "a.cc"));
 }
 
 TEST_F(ConfigCompileTests, CompilationDatabase) {
@@ -149,7 +150,7 @@ TEST_F(ConfigCompileTests, CompilationDatabase) {
             Config::CDBSearchSpec::Ancestors)
       << "default value";
   EXPECT_THAT(Diags.Diagnostics,
-              ElementsAre(DiagMessage(
+              ElementsAre(diagMessage(
                   "CompilationDatabase must be an absolute path, because this "
                   "fragment is not associated with any directory.")));
 
@@ -183,7 +184,7 @@ TEST_F(ConfigCompileTests, Index) {
       << "by default";
   EXPECT_THAT(
       Diags.Diagnostics,
-      ElementsAre(DiagMessage(
+      ElementsAre(diagMessage(
           "Invalid Background value 'Foo'. Valid values are Build, Skip.")));
 }
 
@@ -245,22 +246,43 @@ TEST_F(ConfigCompileTests, PathSpecMatch) {
 }
 
 TEST_F(ConfigCompileTests, DiagnosticsIncludeCleaner) {
-  // Defaults to None.
+  // Defaults to Strict.
   EXPECT_TRUE(compileAndApply());
-  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes,
-            Config::UnusedIncludesPolicy::None);
+  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes, Config::IncludesPolicy::Strict);
 
   Frag = {};
   Frag.Diagnostics.UnusedIncludes.emplace("None");
   EXPECT_TRUE(compileAndApply());
-  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes,
-            Config::UnusedIncludesPolicy::None);
+  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes, Config::IncludesPolicy::None);
 
   Frag = {};
   Frag.Diagnostics.UnusedIncludes.emplace("Strict");
   EXPECT_TRUE(compileAndApply());
-  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes,
-            Config::UnusedIncludesPolicy::Strict);
+  EXPECT_EQ(Conf.Diagnostics.UnusedIncludes, Config::IncludesPolicy::Strict);
+
+  Frag = {};
+  EXPECT_TRUE(Conf.Diagnostics.Includes.IgnoreHeader.empty())
+      << Conf.Diagnostics.Includes.IgnoreHeader.size();
+  Frag.Diagnostics.Includes.IgnoreHeader.push_back(
+      Located<std::string>("foo.h"));
+  Frag.Diagnostics.Includes.IgnoreHeader.push_back(
+      Located<std::string>(".*inc"));
+  EXPECT_TRUE(compileAndApply());
+  auto HeaderFilter = [this](llvm::StringRef Path) {
+    for (auto &Filter : Conf.Diagnostics.Includes.IgnoreHeader) {
+      if (Filter(Path))
+        return true;
+    }
+    return false;
+  };
+  EXPECT_TRUE(HeaderFilter("foo.h"));
+  EXPECT_FALSE(HeaderFilter("bar.h"));
+
+  Frag = {};
+  EXPECT_FALSE(Conf.Diagnostics.Includes.AnalyzeAngledIncludes);
+  Frag.Diagnostics.Includes.AnalyzeAngledIncludes = true;
+  EXPECT_TRUE(compileAndApply());
+  EXPECT_TRUE(Conf.Diagnostics.Includes.AnalyzeAngledIncludes);
 }
 
 TEST_F(ConfigCompileTests, DiagnosticSuppression) {
@@ -276,19 +298,20 @@ TEST_F(ConfigCompileTests, DiagnosticSuppression) {
                                    "unreachable-code", "unused-variable",
                                    "typecheck_bool_condition",
                                    "unexpected_friend", "warn_alloca"));
-  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(diag::warn_unreachable,
-                                            Conf.Diagnostics.Suppress));
+  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(
+      diag::warn_unreachable, Conf.Diagnostics.Suppress, LangOptions()));
   // Subcategory not respected/suppressed.
-  EXPECT_FALSE(isBuiltinDiagnosticSuppressed(diag::warn_unreachable_break,
-                                             Conf.Diagnostics.Suppress));
-  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(diag::warn_unused_variable,
-                                            Conf.Diagnostics.Suppress));
+  EXPECT_FALSE(isBuiltinDiagnosticSuppressed(
+      diag::warn_unreachable_break, Conf.Diagnostics.Suppress, LangOptions()));
+  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(
+      diag::warn_unused_variable, Conf.Diagnostics.Suppress, LangOptions()));
   EXPECT_TRUE(isBuiltinDiagnosticSuppressed(diag::err_typecheck_bool_condition,
-                                            Conf.Diagnostics.Suppress));
-  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(diag::err_unexpected_friend,
-                                            Conf.Diagnostics.Suppress));
-  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(diag::warn_alloca,
-                                            Conf.Diagnostics.Suppress));
+                                            Conf.Diagnostics.Suppress,
+                                            LangOptions()));
+  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(
+      diag::err_unexpected_friend, Conf.Diagnostics.Suppress, LangOptions()));
+  EXPECT_TRUE(isBuiltinDiagnosticSuppressed(
+      diag::warn_alloca, Conf.Diagnostics.Suppress, LangOptions()));
 
   Frag.Diagnostics.Suppress.emplace_back("*");
   EXPECT_TRUE(compileAndApply());
@@ -323,9 +346,9 @@ TEST_F(ConfigCompileTests, Tidy) {
   EXPECT_THAT(
       Diags.Diagnostics,
       ElementsAre(
-          DiagMessage(
+          diagMessage(
               "clang-tidy check 'bugprone-use-after-move' was not found"),
-          DiagMessage("clang-tidy check 'llvm-include-order' was not found")));
+          diagMessage("clang-tidy check 'llvm-include-order' was not found")));
 #endif
 }
 
@@ -340,11 +363,11 @@ TEST_F(ConfigCompileTests, TidyBadChecks) {
   EXPECT_THAT(
       Diags.Diagnostics,
       ElementsAre(
-          AllOf(DiagMessage("clang-tidy check 'unknown-check' was not found"),
-                DiagKind(llvm::SourceMgr::DK_Warning)),
+          AllOf(diagMessage("clang-tidy check 'unknown-check' was not found"),
+                diagKind(llvm::SourceMgr::DK_Warning)),
           AllOf(
-              DiagMessage("clang-tidy check 'llvm-includeorder' was not found"),
-              DiagKind(llvm::SourceMgr::DK_Warning))));
+              diagMessage("clang-tidy check 'llvm-includeorder' was not found"),
+              diagKind(llvm::SourceMgr::DK_Warning))));
 }
 
 TEST_F(ConfigCompileTests, ExternalServerNeedsTrusted) {
@@ -354,7 +377,7 @@ TEST_F(ConfigCompileTests, ExternalServerNeedsTrusted) {
   compileAndApply();
   EXPECT_THAT(
       Diags.Diagnostics,
-      ElementsAre(DiagMessage(
+      ElementsAre(diagMessage(
           "Remote index may not be specified by untrusted configuration. "
           "Copy this into user config to use it.")));
   EXPECT_EQ(Conf.Index.External.Kind, Config::ExternalIndexSpec::None);
@@ -371,8 +394,8 @@ TEST_F(ConfigCompileTests, ExternalBlockWarnOnMultipleSource) {
   EXPECT_THAT(
       Diags.Diagnostics,
       Contains(
-          AllOf(DiagMessage("Exactly one of File, Server or None must be set."),
-                DiagKind(llvm::SourceMgr::DK_Error))));
+          AllOf(diagMessage("Exactly one of File, Server or None must be set."),
+                diagKind(llvm::SourceMgr::DK_Error))));
 #else
   ASSERT_TRUE(Conf.Index.External.hasValue());
   EXPECT_EQ(Conf.Index.External->Kind, Config::ExternalIndexSpec::File);
@@ -396,8 +419,8 @@ TEST_F(ConfigCompileTests, ExternalBlockErrOnNoSource) {
   EXPECT_THAT(
       Diags.Diagnostics,
       Contains(
-          AllOf(DiagMessage("Exactly one of File, Server or None must be set."),
-                DiagKind(llvm::SourceMgr::DK_Error))));
+          AllOf(diagMessage("Exactly one of File, Server or None must be set."),
+                diagKind(llvm::SourceMgr::DK_Error))));
 }
 
 TEST_F(ConfigCompileTests, ExternalBlockDisablesBackgroundIndex) {
@@ -415,7 +438,7 @@ TEST_F(ConfigCompileTests, ExternalBlockDisablesBackgroundIndex) {
 
 TEST_F(ConfigCompileTests, ExternalBlockMountPoint) {
   auto GetFrag = [](llvm::StringRef Directory,
-                    llvm::Optional<const char *> MountPoint) {
+                    std::optional<const char *> MountPoint) {
     Fragment Frag;
     Frag.Source.Directory = Directory.str();
     Fragment::IndexBlock::ExternalBlock External;
@@ -435,9 +458,9 @@ TEST_F(ConfigCompileTests, ExternalBlockMountPoint) {
   ASSERT_THAT(
       Diags.Diagnostics,
       ElementsAre(
-          AllOf(DiagMessage("MountPoint must be an absolute path, because this "
+          AllOf(diagMessage("MountPoint must be an absolute path, because this "
                             "fragment is not associated with any directory."),
-                DiagKind(llvm::SourceMgr::DK_Error))));
+                diagKind(llvm::SourceMgr::DK_Error))));
   EXPECT_EQ(Conf.Index.External.Kind, Config::ExternalIndexSpec::None);
 
   auto FooPath = testPath("foo/", llvm::sys::path::Style::posix);
@@ -450,7 +473,7 @@ TEST_F(ConfigCompileTests, ExternalBlockMountPoint) {
   EXPECT_THAT(Conf.Index.External.MountPoint, FooPath);
 
   // None defaults to ".".
-  Frag = GetFrag(FooPath, llvm::None);
+  Frag = GetFrag(FooPath, std::nullopt);
   compileAndApply();
   ASSERT_THAT(Diags.Diagnostics, IsEmpty());
   ASSERT_EQ(Conf.Index.External.Kind, Config::ExternalIndexSpec::File);
@@ -514,6 +537,14 @@ TEST_F(ConfigCompileTests, AllScopes) {
   Frag.Completion.AllScopes = true;
   EXPECT_TRUE(compileAndApply());
   EXPECT_TRUE(Conf.Completion.AllScopes);
+}
+
+TEST_F(ConfigCompileTests, Style) {
+  Frag = {};
+  Frag.Style.FullyQualifiedNamespaces.push_back(std::string("foo"));
+  Frag.Style.FullyQualifiedNamespaces.push_back(std::string("bar"));
+  EXPECT_TRUE(compileAndApply());
+  EXPECT_THAT(Conf.Style.FullyQualifiedNamespaces, ElementsAre("foo", "bar"));
 }
 } // namespace
 } // namespace config

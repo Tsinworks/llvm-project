@@ -18,7 +18,8 @@ There are two buildmasters running.
   the build.
 * The staging buildmaster at `<https://lab.llvm.org/staging>`_. All builders
   attached to this machine will be completely silent by default when the build
-  is broken.
+  is broken. This buildmaster is reconfigured every two hours with any new
+  commits from the llvm-zorg repository.
 
 In order to remain connected to the main buildmaster (and thus notify
 developers of failures), a builbot must:
@@ -62,15 +63,14 @@ Here are the steps you can follow to do so:
    will get feedback sooner after changes get committed.
 
 #. The computer you will be registering with the LLVM buildbot
-   infrastructure should have all dependencies installed and you can
-   actually build your configuration successfully. Please check what degree
+   infrastructure should have all dependencies installed and be able to
+   build your configuration successfully. Please check what degree
    of parallelism (-j param) would give the fastest build.  You can build
    multiple configurations on one computer.
 
-#. Install buildbot-worker (currently we are using buildbot version 2.8.5).
-   Depending on the platform, buildbot-worker could be available to download and
-   install with your package manager, or you can download it directly from
-   `<http://trac.buildbot.net>`_ and install it manually.
+#. Install buildbot-worker (currently we are using buildbot version 2.8.4).
+   This specific version can be installed using ``pip``, with a command such
+   as ``pip3 install buildbot-worker==2.8.4``.
 
 #. Create a designated user account, your buildbot-worker will be running under,
    and set appropriate permissions.
@@ -80,7 +80,7 @@ Here are the steps you can follow to do so:
    to authenticate your buildbot-worker.
 
 #. Create a buildbot-worker in context of that buildbot-worker account. Point it
-   to the **lab.llvm.org** port **9990** (see `Buildbot documentation,
+   to the **lab.llvm.org** port **9994** (see `Buildbot documentation,
    Creating a worker
    <http://docs.buildbot.net/current/tutorial/firstrun.html#creating-a-worker>`_
    for more details) by running the following command:
@@ -88,12 +88,28 @@ Here are the steps you can follow to do so:
     .. code-block:: bash
 
        $ buildbot-worker create-worker <buildbot-worker-root-directory> \
-                    lab.llvm.org:9990 \
+                    lab.llvm.org:9994 \
                     <buildbot-worker-access-name> \
                     <buildbot-worker-access-password>
 
-   To point a worker to silent master please use lab.llvm.org:9994 instead
-   of lab.llvm.org:9990.
+   Only once a new worker is stable, and
+   approval from Galina has been received (see last step) should it
+   be pointed at the main buildmaster.
+
+   Now start the worker:
+
+    .. code-block:: bash
+
+       $ buildbot-worker start <buildbot-worker-root-directory>
+
+   This will cause your new worker to connect to the staging buildmaster
+   which is silent by default.
+
+   Try this once then check the log file
+   ``<buildbot-worker-root-directory>/worker/twistd.log``. If your settings
+   are correct you will see a refused connection. This is good and expected,
+   as the credentials have not been established on both ends. Now stop the
+   worker and proceed to the next steps.
 
 #. Fill the buildbot-worker description and admin name/e-mail.  Here is an
    example of the buildbot-worker description::
@@ -106,10 +122,8 @@ Here are the steps you can follow to do so:
        cmake version 2.8.4
        Microsoft(R) 32-bit C/C++ Optimizing Compiler Version 16.00.40219.01 for 80x86
 
-#. Make sure you can actually start the buildbot-worker successfully. Then set
-   up your buildbot-worker to start automatically at the start up time.  See the
-   buildbot documentation for help.  You may want to restart your computer
-   to see if it works.
+   See `here <http://docs.buildbot.net/current/manual/installation/worker.html>`_
+   for which files to edit.
 
 #. Send a patch which adds your build worker and your builder to
    `zorg <https://github.com/llvm/llvm-zorg>`_. Use the typical LLVM
@@ -136,17 +150,34 @@ Here are the steps you can follow to do so:
    otherwise.
 
 #. Send the buildbot-worker access name and the access password directly to
-   `Galina Kistanova <mailto:gkistanova@gmail.com>`_, and wait till she
-   will let you know that your changes are applied and buildmaster is
+   `Galina Kistanova <mailto:gkistanova@gmail.com>`_, and wait until she
+   lets you know that your changes are applied and buildmaster is
    reconfigured.
 
-#. Check the status of your buildbot-worker on the `Waterfall Display
-   <http://lab.llvm.org/buildbot/#/waterfall>`_ to make sure it is connected,
-   and the `Workers Display <http://lab.llvm.org/buildbot/#/workers>`_ to see if
-   administrator contact and worker information are correct.
+#. Make sure you can start the buildbot-worker and successfully connect
+   to the silent buildmaster. Then set up your buildbot-worker to start
+   automatically at the start up time.  See the buildbot documentation
+   for help.  You may want to restart your computer to see if it works.
 
-#. Wait for the first build to succeed and enjoy.
+#. Check the status of your buildbot-worker on the `Waterfall Display (Staging)
+   <http://lab.llvm.org/staging/#/waterfall>`_ to make sure it is
+   connected, and the `Workers Display (Staging)
+   <http://lab.llvm.org/staging/#/workers>`_ to see if administrator
+   contact and worker information are correct.
 
+#. At this point, you have a working builder connected to the staging
+   buildmaster.  You can now make sure it is reliably green and keeps
+   up with the build queue.  No notifications will be sent, so you can
+   keep an unstable builder connected to staging indefinitely.
+
+#. (Optional) Once the builder is stable on the staging buildmaster with
+   several days of green history, you can choose to move it to the production
+   buildmaster to enable developer notifications.  Please email `Galina
+   Kistanova <mailto:gkistanova@gmail.com>`_ for review and approval.
+
+   To move a worker to production (once approved), stop your worker, edit the
+   buildbot.tac file to change the port number from 9994 to 9990 and start it
+   again.
 
 Best Practices for Configuring a Fast Builder
 =============================================
@@ -205,7 +236,7 @@ Use Ninja & LLD
   Ninja really does help build times over Make, particularly for highly
   parallel builds.  LLD helps to reduce both link times and memory usage
   during linking significantly.  With a build machine with sufficient
-  parallism, link times tend to dominate critical path of the build, and are
+  parallelism, link times tend to dominate critical path of the build, and are
   thus worth optimizing.
 
 Use CCache and NOT incremental builds
@@ -245,4 +276,33 @@ Leave it on the staging buildmaster
   impacting the broader community.  The sponsoring organization simply
   has to take on the responsibility of all bisection and triage.
 
-  
+Managing a Worker From The Web Interface
+========================================
+
+Tasks such as clearing pending building requests can be done using
+the Buildbot web interface. To do this you must be recognised as an admin
+of the worker:
+
+* Set your public GitHub profile email to one that was included in the
+  ``admin`` information you set up on the worker. It does not matter if this
+  is your primary account email or a "verified email". To confirm this has been
+  done correctly, go to ``github.com/<your GitHub username>`` and you should
+  see the email address listed there.
+
+  A worker can have many admins, if they are listed in the form
+  ``First Last <first.last@example.com>, First2 Last2 <first2.last2@example.com>``.
+  You only need to have one of those addresses in your profile to be recognised
+  as an admin.
+
+  If you need to add an email address, you can edit the ``admin`` file and
+  restart the worker. You should see the new admin details in the web interface
+  shortly afterwards.
+
+* Connect GitHub to Buildbot by clicking on the "Anonymous" button on the
+  top right of the page, then "Login with GitHub" and authorise the app.
+
+Some tasks don't give immediate feedback, so if nothing happens within a short
+time, try again with the browser's web console open. Sometimes you will see
+403 errors and other messages that might indicate you don't have the correct
+details set up.
+
